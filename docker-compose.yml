@@ -1,0 +1,15 @@
+version: '3.8'
+
+services:
+  trading-bot:
+    build: .
+    container_name: webull-trading-bot
+    restart: always
+    environment:
+      - WEBULL_APP_KEY=${WEBULL_APP_KEY}
+      - WEBULL_APP_SECRET=${WEBULL_APP_SECRET}
+      - WEBULL_ACCOUNT_ID=${WEBULL_ACCOUNT_ID}
+      - TZ=America/New_York
+    volumes:
+      - ./:/app
+    command: python master_scheduler.py
