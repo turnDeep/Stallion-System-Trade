@@ -11,6 +11,7 @@ from webullsdkcore.common.enums import Region
 from webullsdktrade.api import API
 from webullsdkmdata.quotes.market_data import MarketData
 from webullsdkmdata.common.category import Category
+from webullsdktrade.common.currency import Currency
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
@@ -67,6 +68,42 @@ def place_order(api, symbol, side, qty, order_type="MARKET", limit_price=None):
             logger.error(f"Order failed: {res.status_code} - {res.text}")
     except Exception as e:
         logger.error(f"Order exception: {e}")
+    return None
+
+def get_buying_power(trade_api):
+    """Fetch the actual account cash balance (buying power) from Webull API."""
+    try:
+        res = trade_api.account.get_account_balance(ACCOUNT_ID, Currency.USD.value)
+        if res.status_code == 200:
+            data = res.json()
+            # Parse buying power from the response
+            # The API may return various balance fields; try common ones
+            if isinstance(data, dict):
+                buying_power = (
+                    data.get('buying_power') or 
+                    data.get('buyingPower') or 
+                    data.get('cash_balance') or 
+                    data.get('cashBalance') or 
+                    data.get('net_liquidation') or
+                    data.get('netLiquidation') or
+                    data.get('total_cash') or
+                    data.get('totalCash', 0)
+                )
+                # Some responses nest balances inside account_balance_list
+                if not buying_power and 'account_balance_list' in data:
+                    for bal in data['account_balance_list']:
+                        if bal.get('currency') == 'USD':
+                            buying_power = bal.get('cash_balance') or bal.get('net_liquidation', 0)
+                            break
+                if buying_power:
+                    bp = float(buying_power)
+                    logger.info(f"Account Buying Power (USD): ${bp:,.2f}")
+                    return bp
+            logger.warning(f"Could not parse buying power from response: {data}")
+        else:
+            logger.error(f"Account balance API failed: {res.status_code} - {res.text}")
+    except Exception as e:
+        logger.error(f"Failed to fetch account balance: {e}")
     return None
 
 def fetch_webull_prices(quotes_api, symbols):
@@ -155,6 +192,16 @@ def main():
     active_trade = None
     trade_symbol = None
     entry_price = 0.0
+    trade_qty = 0
+    
+    # Fetch real account balance from Webull
+    buying_power = get_buying_power(trade_api)
+    if buying_power is None or buying_power <= 0:
+        logger.error("Could not retrieve buying power. Aborting.")
+        return
+    
+    trade_capital = buying_power * 0.90  # Use 90% of actual balance
+    logger.info(f"Trade Capital (90% of ${buying_power:,.2f}): ${trade_capital:,.2f}")
     
     logger.info("Beginning active breakout monitoring...")
     
@@ -166,8 +213,8 @@ def main():
         if now.hour == 15 and now.minute >= 55:
             logger.info("15:55 PM Reached. Liquidating active day trades (EOD Rule).")
             if active_trade and trade_symbol:
-                logger.info(f"Liquidating {trade_symbol} Market Sell...")
-                place_order(trade_api, trade_symbol, "SELL", active_trade.get('quantity', 100), "MARKET")
+                logger.info(f"Liquidating {trade_symbol} ({trade_qty} shares) Market Sell...")
+                place_order(trade_api, trade_symbol, "SELL", trade_qty, "MARKET")
             break
             
         # 2. Check Time Stop for Entries (10:30 AM)
@@ -185,12 +232,17 @@ def main():
                     current_price = current_prices[sym]
                     if current_price > open_high:
                         logger.info(f"*** BREAKOUT DETECTED: {sym} at {current_price} > {open_high} ***")
-                        # Calculate position sizing (assuming $10k available, using 90% = $9k)
-                        qty = int(9000 // current_price)
+                        # Calculate position sizing from real account balance
+                        qty = int(trade_capital // current_price)
+                        if qty <= 0:
+                            logger.warning(f"Insufficient capital for {sym} at ${current_price}")
+                            continue
+                        logger.info(f"Placing BUY order: {qty} shares of {sym} (${trade_capital:,.2f} / ${current_price:.2f})")
                         res = place_order(trade_api, sym, "BUY", qty, "MARKET")
                         if res:
                             active_trade = res
                             trade_symbol = sym
+                            trade_qty = qty
                             entry_price = current_price
                         break # Only take ONE trade per day!
                         
@@ -202,11 +254,11 @@ def main():
                 
                 if pnl_pct >= 0.10:
                     logger.info(f"*** TAKE PROFIT HIT: {trade_symbol} (+{pnl_pct*100:.2f}%) ***")
-                    place_order(trade_api, trade_symbol, "SELL", active_trade.get('quantity', 100), "MARKET")
+                    place_order(trade_api, trade_symbol, "SELL", trade_qty, "MARKET")
                     break
                 elif pnl_pct <= -0.03:
                     logger.info(f"*** STOP LOSS HIT: {trade_symbol} ({pnl_pct*100:.2f}%) ***")
-                    place_order(trade_api, trade_symbol, "SELL", active_trade.get('quantity', 100), "MARKET")
+                    place_order(trade_api, trade_symbol, "SELL", trade_qty, "MARKET")
                     break
             
         time.sleep(2) # Webull MDR handles quick polling (e.g. 2 sec), much faster than yfinance
