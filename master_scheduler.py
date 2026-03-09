@@ -9,14 +9,14 @@ import logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-def run_weekend_ml_pipeline():
-    logger.info("Starting weekend ML optimization pipeline (60-day PCA framework)...")
+def run_daily_ml_pipeline():
+    logger.info("Starting daily ML optimization pipeline (60-day PCA framework)...")
     try:
-        # Run the ML pipeline script to generate the new Top 10 list
+        # Run the ML pipeline script to generate the new Top 10 list based on today's close
         subprocess.run(['python', 'ml_pipeline_60d.py'], check=True)
-        logger.info("Weekend ML pipeline completed successfully. Top 10 watchlist updated.")
+        logger.info("Daily ML pipeline completed successfully. Top 10 watchlist updated for tomorrow.")
     except Exception as e:
-        logger.error(f"Error running weekend ML pipeline: {e}")
+        logger.error(f"Error running daily ML pipeline: {e}")
 
 def run_daily_trading_bot():
     logger.info("Initializing daily trading bot...")
@@ -36,8 +36,12 @@ def run_daily_trading_bot():
 def main():
     logger.info("Starting Master Scheduler. Timezone is set to America/New_York.")
     
-    # Schedule Weekend Optimization: Every Sunday at 12:00 PM EST
-    schedule.every().sunday.at("12:00").do(run_weekend_ml_pipeline)
+    # Schedule Daily Optimization: Every Mon-Fri at 17:00 (5:00 PM) EST
+    schedule.every().monday.at("17:00").do(run_daily_ml_pipeline)
+    schedule.every().tuesday.at("17:00").do(run_daily_ml_pipeline)
+    schedule.every().wednesday.at("17:00").do(run_daily_ml_pipeline)
+    schedule.every().thursday.at("17:00").do(run_daily_ml_pipeline)
+    schedule.every().friday.at("17:00").do(run_daily_ml_pipeline)
     
     # Schedule Daily Bot: Every Mon-Fri at 09:25 AM EST (to give it time to boot up before 9:30 open)
     schedule.every().monday.at("09:25").do(run_daily_trading_bot)
