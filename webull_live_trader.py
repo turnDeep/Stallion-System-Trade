@@ -53,7 +53,7 @@ def place_order(api, symbol, side, qty, order_type="MARKET", limit_price=None):
         "side": side,
         "time_in_force": "DAY",
         "entrust_type": "QTY",
-        "account_tax_type": "GENERAL"
+        "account_tax_type": "SPECIFIC"
     }
     
     if limit_price:
