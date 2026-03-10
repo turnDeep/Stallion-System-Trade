@@ -3,3 +3,5 @@ requests
 python-dotenv
 tqdm
 yfinance
+beautifulsoup4
+schedule

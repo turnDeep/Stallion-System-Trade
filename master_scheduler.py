@@ -5,15 +5,23 @@ import pytz
 import os
 import subprocess
 import logging
+import json
+import sys
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
+SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+WATCHLIST_PATH = os.path.join(SCRIPT_DIR, "top_10_watchlist.json")
+
+
+def run_python_script(script_name):
+    subprocess.run([sys.executable, script_name], check=True, cwd=SCRIPT_DIR)
 
 def run_daily_ml_pipeline():
     logger.info("Starting daily ML optimization pipeline (60-day Ex-Ante Feature framework)...")
     try:
         # Run the ML pipeline script to generate the new Top 10 list based on today's close
-        subprocess.run(['python', 'ml_pipeline_60d.py'], check=True)
+        run_python_script('ml_pipeline_60d.py')
         logger.info("Daily ML pipeline completed successfully. Top 10 watchlist updated for tomorrow.")
     except Exception as e:
         logger.error(f"Error running daily ML pipeline: {e}")
@@ -29,12 +37,35 @@ def run_daily_trading_bot():
     try:
         # Run the daily trading execution script
         # This script connects to Webull Execution but reads FMP Quotes.
-        subprocess.run(['python', 'webull_live_trader.py'], check=True)
+        run_python_script('webull_live_trader.py')
     except Exception as e:
         logger.error(f"Daily trading bot error: {e}")
 
+
+def watchlist_missing_or_empty():
+    if not os.path.exists(WATCHLIST_PATH):
+        return True
+
+    try:
+        with open(WATCHLIST_PATH, "r", encoding="utf-8") as handle:
+            watchlist = json.load(handle)
+    except (OSError, json.JSONDecodeError):
+        return True
+
+    return not isinstance(watchlist, list) or len(watchlist) == 0
+
+
+def run_startup_pipeline_if_needed():
+    if watchlist_missing_or_empty():
+        logger.info("No startup watchlist detected. Running one-shot ML pipeline bootstrap now...")
+        run_daily_ml_pipeline()
+        return
+
+    logger.info("Existing watchlist detected. Skipping startup pipeline bootstrap.")
+
 def main():
     logger.info("Starting Master Scheduler. Timezone is set to America/New_York.")
+    run_startup_pipeline_if_needed()
     
     # Schedule Daily Optimization: Every Mon-Fri at 17:00 (5:00 PM) EST
     schedule.every().monday.at("17:00").do(run_daily_ml_pipeline)

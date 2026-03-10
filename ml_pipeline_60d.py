@@ -1,10 +1,14 @@
 import json
 import os
 import pickle
+import re
+import warnings
 
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
+from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
 from tqdm import tqdm
 
 
@@ -16,6 +20,15 @@ MIN_DOLLAR_ADV = 5_000_000.0
 TOP_N = 10
 YF_BATCH_SIZE = 100
 MAX_DOWNLOAD_PERIOD = "60d"
+BOOTSTRAP_PROGRESS_SAVE_EVERY = 5
+BOOTSTRAP_MIN_SYMBOLS = 2500
+ISHARES_REQUEST_TIMEOUT = 60
+ISHARES_RUSSELL_HOLDINGS_URLS = {
+    "IWB": "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/1521942788811.ajax?dataType=fund&fileName=iShares-Russell-1000-ETF_fund&fileType=xls",
+    "IWM": "https://www.ishares.com/us/products/239710/ishares-russell-2000-etf/1521942788811.ajax?dataType=fund&fileName=iShares-Russell-2000-ETF_fund&fileType=xls",
+    "IWV": "https://www.ishares.com/us/products/239714/ishares-russell-3000-etf/1521942788811.ajax?dataType=fund&fileName=iShares-Russell-3000-ETF_fund&fileType=xls",
+}
+SYMBOL_PATTERN = re.compile(r"^[A-Z0-9-]+$")
 
 
 def zscore(series: pd.Series) -> pd.Series:
@@ -25,16 +38,20 @@ def zscore(series: pd.Series) -> pd.Series:
     return (series - series.mean()) / std
 
 
+def empty_intraday_frame() -> pd.DataFrame:
+    return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+
+
 def normalize_intraday_frame(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
-        return pd.DataFrame(columns=["open", "high", "low", "close", "volume"])
+        return empty_intraday_frame()
 
     df = df.copy()
     df.columns = [str(col).lower() for col in df.columns]
     required = ["open", "high", "low", "close", "volume"]
     missing = [col for col in required if col not in df.columns]
     if missing:
-        return pd.DataFrame(columns=required)
+        return empty_intraday_frame()
 
     if getattr(df.index, "tz", None) is not None:
         df.index = df.index.tz_convert("America/New_York").tz_localize(None)
@@ -57,6 +74,20 @@ def merge_intraday_frames(existing: pd.DataFrame, new_data: pd.DataFrame) -> pd.
     return merged.sort_index()
 
 
+def normalize_symbol(symbol: str) -> str:
+    symbol = str(symbol).strip().upper()
+    if not symbol:
+        return ""
+    symbol = symbol.replace("/", "-").replace(".", "-")
+    if symbol.strip("-") == "":
+        return ""
+    if not SYMBOL_PATTERN.fullmatch(symbol):
+        return ""
+    if not any(char.isalpha() for char in symbol):
+        return ""
+    return symbol
+
+
 def load_pickle(path: str) -> dict[str, pd.DataFrame]:
     with open(path, "rb") as f:
         data = pickle.load(f)
@@ -66,6 +97,106 @@ def load_pickle(path: str) -> dict[str, pd.DataFrame]:
 def save_pickle(path: str, data: dict[str, pd.DataFrame]) -> None:
     with open(path, "wb") as f:
         pickle.dump(data, f)
+
+
+def parse_ishares_holdings_symbols(payload: str) -> set[str]:
+    warnings.filterwarnings("ignore", category=XMLParsedAsHTMLWarning)
+    soup = BeautifulSoup(payload, "html.parser")
+
+    holdings_sheet = None
+    for worksheet in soup.find_all("ss:worksheet"):
+        if worksheet.get("ss:name") == "Holdings":
+            holdings_sheet = worksheet
+            break
+    if holdings_sheet is None:
+        raise ValueError("Could not find the Holdings worksheet in the iShares download.")
+
+    header = None
+    symbols: set[str] = set()
+    for row in holdings_sheet.find_all("ss:row"):
+        values: list[str] = []
+        for cell in row.find_all("ss:cell", recursive=False):
+            cell_index = cell.get("ss:index")
+            if cell_index is not None:
+                while len(values) < int(cell_index) - 1:
+                    values.append("")
+
+            data = cell.find("ss:data")
+            values.append(data.get_text(strip=True) if data else "")
+
+        if not values:
+            continue
+
+        if header is None and values[0] == "Ticker":
+            header = values
+            continue
+
+        if header is None:
+            continue
+
+        if len(values) < len(header):
+            values.extend([""] * (len(header) - len(values)))
+        row_data = dict(zip(header, values))
+
+        symbol = normalize_symbol(row_data.get("Ticker", ""))
+        asset_class = row_data.get("Asset Class", "").strip()
+        location = row_data.get("Location", "").strip()
+        if not symbol or asset_class != "Equity" or location != "United States":
+            continue
+        symbols.add(symbol)
+
+    return symbols
+
+
+def fetch_russell_universe_symbols() -> list[str]:
+    universe: set[str] = set()
+    for fund_name, url in ISHARES_RUSSELL_HOLDINGS_URLS.items():
+        response = requests.get(url, timeout=ISHARES_REQUEST_TIMEOUT)
+        response.raise_for_status()
+        fund_symbols = parse_ishares_holdings_symbols(response.text)
+        print(f"Loaded {len(fund_symbols)} U.S. equity symbols from {fund_name} holdings.")
+        universe.update(fund_symbols)
+
+    if len(universe) < BOOTSTRAP_MIN_SYMBOLS:
+        raise RuntimeError(
+            f"Bootstrap universe looks incomplete ({len(universe)} symbols). "
+            "Aborting to avoid seeding a broken store."
+        )
+    return sorted(universe)
+
+
+def bootstrap_intraday_store() -> dict[str, pd.DataFrame]:
+    print("No local universe file found. Bootstrapping from official iShares Russell holdings...")
+    symbols = fetch_russell_universe_symbols()
+    print(f"Bootstrapping {DATA_PKL} with {len(symbols)} Russell-family symbols via yfinance 5m history...")
+
+    data_60d: dict[str, pd.DataFrame] = {}
+    batches = range(0, len(symbols), YF_BATCH_SIZE)
+    for batch_number, start in enumerate(
+        tqdm(batches, desc="Bootstrapping intraday store"),
+        start=1,
+    ):
+        batch = symbols[start : start + YF_BATCH_SIZE]
+        fetched = fetch_yfinance_batch(batch, period=MAX_DOWNLOAD_PERIOD)
+
+        missing_symbols = [symbol for symbol in batch if symbol not in fetched]
+        if missing_symbols:
+            retry_fetched = fetch_yfinance_batch(missing_symbols, period=MAX_DOWNLOAD_PERIOD)
+            fetched.update(retry_fetched)
+
+        for symbol in batch:
+            data_60d[symbol] = normalize_intraday_frame(fetched.get(symbol, empty_intraday_frame()))
+
+        if batch_number % BOOTSTRAP_PROGRESS_SAVE_EVERY == 0:
+            save_pickle(DATA_PKL, data_60d)
+
+    populated = sum(1 for df in data_60d.values() if not df.empty)
+    print(
+        f"Bootstrap complete. Seeded {len(data_60d)} symbols, "
+        f"with historical bars available for {populated} symbols."
+    )
+    save_pickle(DATA_PKL, data_60d)
+    return data_60d
 
 
 def load_or_bootstrap_intraday_store() -> dict[str, pd.DataFrame]:
@@ -79,9 +210,7 @@ def load_or_bootstrap_intraday_store() -> dict[str, pd.DataFrame]:
         save_pickle(DATA_PKL, data)
         return data
 
-    raise FileNotFoundError(
-        f"Neither {DATA_PKL} nor {LEGACY_DATA_PKL} was found. Please provide a universe data file first."
-    )
+    return bootstrap_intraday_store()
 
 
 def latest_trade_timestamp(data_60d: dict[str, pd.DataFrame]) -> pd.Timestamp | None:
