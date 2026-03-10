@@ -9,7 +9,10 @@ import pandas as pd
 import requests
 import yfinance as yf
 from bs4 import BeautifulSoup, XMLParsedAsHTMLWarning
+from dotenv import load_dotenv
 from tqdm import tqdm
+
+load_dotenv()
 
 
 DATA_PKL = "russell3000_60d_5min.pkl"
@@ -22,6 +25,13 @@ YF_BATCH_SIZE = 100
 MAX_DOWNLOAD_PERIOD = "60d"
 BOOTSTRAP_PROGRESS_SAVE_EVERY = 5
 BOOTSTRAP_MIN_SYMBOLS = 2500
+FMP_REQUEST_TIMEOUT = 60
+FMP_API_KEY = os.getenv("FMP_API_KEY", "")
+FMP_RUSSELL_ETF_SYMBOLS = ("IWV", "IWB", "IWM")
+FMP_ETF_HOLDER_URL = "https://financialmodelingprep.com/api/v3/etf-holder/{symbol}"
+FMP_PROFILE_BATCH_URL = "https://financialmodelingprep.com/api/v3/profile/{symbols}"
+FMP_PROFILE_BATCH_SIZE = 100
+FMP_ALLOWED_EXCHANGES = {"NYSE", "NASDAQ", "AMEX"}
 ISHARES_REQUEST_TIMEOUT = 60
 ISHARES_RUSSELL_HOLDINGS_URLS = {
     "IWB": "https://www.ishares.com/us/products/239707/ishares-russell-1000-etf/1521942788811.ajax?dataType=fund&fileName=iShares-Russell-1000-ETF_fund&fileType=xls",
@@ -148,7 +158,70 @@ def parse_ishares_holdings_symbols(payload: str) -> set[str]:
     return symbols
 
 
-def fetch_russell_universe_symbols() -> list[str]:
+def fetch_fmp_etf_holder_symbols(etf_symbol: str) -> set[str]:
+    response = requests.get(
+        FMP_ETF_HOLDER_URL.format(symbol=etf_symbol),
+        params={"apikey": FMP_API_KEY},
+        timeout=FMP_REQUEST_TIMEOUT,
+    )
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, list):
+        raise RuntimeError(f"Unexpected ETF holder payload for {etf_symbol}: {payload}")
+
+    symbols: set[str] = set()
+    for row in payload:
+        symbol = normalize_symbol(row.get("asset", ""))
+        if symbol:
+            symbols.add(symbol)
+    return symbols
+
+
+def fetch_russell_universe_symbols_from_fmp() -> list[str]:
+    if not FMP_API_KEY:
+        raise RuntimeError("FMP_API_KEY is missing. Cannot bootstrap the Russell universe from FMP.")
+
+    raw_universe: set[str] = set()
+    for etf_symbol in FMP_RUSSELL_ETF_SYMBOLS:
+        etf_symbols = fetch_fmp_etf_holder_symbols(etf_symbol)
+        print(f"Loaded {len(etf_symbols)} holdings from FMP ETF holder feed for {etf_symbol}.")
+        raw_universe.update(etf_symbols)
+
+    universe: set[str] = set()
+    raw_symbols = sorted(raw_universe)
+    for start in range(0, len(raw_symbols), FMP_PROFILE_BATCH_SIZE):
+        batch = raw_symbols[start : start + FMP_PROFILE_BATCH_SIZE]
+        response = requests.get(
+            FMP_PROFILE_BATCH_URL.format(symbols=",".join(batch)),
+            params={"apikey": FMP_API_KEY},
+            timeout=FMP_REQUEST_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, list):
+            raise RuntimeError(f"Unexpected FMP profile payload: {payload}")
+
+        for row in payload:
+            symbol = normalize_symbol(row.get("symbol", ""))
+            exchange = row.get("exchangeShortName")
+            if not symbol or exchange not in FMP_ALLOWED_EXCHANGES:
+                continue
+            if row.get("isEtf") or row.get("isFund"):
+                continue
+            if not row.get("isActivelyTrading", True):
+                continue
+            universe.add(symbol)
+
+    print(f"Retained {len(universe)} U.S.-listed common-stock symbols after FMP profile filtering.")
+
+    if len(universe) < BOOTSTRAP_MIN_SYMBOLS:
+        raise RuntimeError(
+            f"FMP bootstrap universe looks incomplete ({len(universe)} symbols)."
+        )
+    return sorted(universe)
+
+
+def fetch_russell_universe_symbols_from_ishares() -> list[str]:
     universe: set[str] = set()
     for fund_name, url in ISHARES_RUSSELL_HOLDINGS_URLS.items():
         response = requests.get(url, timeout=ISHARES_REQUEST_TIMEOUT)
@@ -159,14 +232,23 @@ def fetch_russell_universe_symbols() -> list[str]:
 
     if len(universe) < BOOTSTRAP_MIN_SYMBOLS:
         raise RuntimeError(
-            f"Bootstrap universe looks incomplete ({len(universe)} symbols). "
+            f"iShares bootstrap universe looks incomplete ({len(universe)} symbols). "
             "Aborting to avoid seeding a broken store."
         )
     return sorted(universe)
 
 
+def fetch_russell_universe_symbols() -> list[str]:
+    try:
+        return fetch_russell_universe_symbols_from_fmp()
+    except Exception as exc:
+        print(f"FMP Russell universe bootstrap failed: {exc}")
+        print("Falling back to official iShares Russell ETF holdings...")
+        return fetch_russell_universe_symbols_from_ishares()
+
+
 def bootstrap_intraday_store() -> dict[str, pd.DataFrame]:
-    print("No local universe file found. Bootstrapping from official iShares Russell holdings...")
+    print("No local universe file found. Bootstrapping from an FMP-sourced Russell universe...")
     symbols = fetch_russell_universe_symbols()
     print(f"Bootstrapping {DATA_PKL} with {len(symbols)} Russell-family symbols via yfinance 5m history...")
 
