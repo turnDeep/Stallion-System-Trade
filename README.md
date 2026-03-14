@@ -1,107 +1,213 @@
-# Stallion-System-Trade 🐎📈
+# Stallion-System-Trade
 
-**Stallion-System-Trade** は、米国株ラッセル3000銘柄を対象とした、完全自律型の「**損小利大・1日1回限定・オープニングレンジブレイクアウト（ORB）**」専用デイトレードBotシステムです。
+Stallion-System-Trade is now a **live-trading scaffold for the standard intraday Russell-3000 model**:
 
-Webull証券（米国株・現物取引）のV2 Trade APIで注文を執行し、FinancialModelingPrep（FMP）APIでリアルタイム価格を取得します。週末の機械学習ベースの銘柄スクリーニングから、平日のリアルタイム自動発注まで、Dockerコンテナ上で24時間365日**全自動**で稼働します。
+- night-before refresh of the **top 3000 U.S. stocks by market cap**
+- daily context computed on **252+ trading days of split-adjusted daily bars**
+- intraday monitoring on **5-minute bars**
+- 15-minute context derived from the 5-minute stream
+- model scoring with the **16-feature hist_gbm_extended 5m_start logic**
+- **next-bar open entry**, **same-day close exit**, **max 4 positions per session**
+- data persisted to **SQLite + Parquet**, not pickle
 
-実績として、過去のホールドアウト（OOS）検証において、取引手数料（片道0.2%）を完全に加味した上で、**Sharpe比5.07・最大ドローダウン-3.97%・ネット+20%超**のパフォーマンスを確認しています。
+## Standard Logic
 
----
+The production system is aligned to the standard logic used in the current research codebase.
 
-## 🌟 システムの特徴（The "Stallion" Philosophy）
+### Trading window
 
-このシステムは「勝率や取引回数」を意図的に捨て、**「1回の爆発力」**に全振りした尖ったハイリスク・ハイリターン哲学を持っています。
+- Signal window: **5 to 90 minutes after the U.S. market open**
+- Earliest practical fill: **next 5-minute bar open**
+- No overnight holding
+- One trade per symbol per day
+- Maximum concurrent positions: **4**
 
-1. **先行指標（Ex-Ante）スコアリングによる「最強の暴れ馬トップ10」の抽出:**
-   毎営業日の引け後、過去40日分の5分足データから「損益に依存しない先行指標」を計算し、Z-Scoreで銘柄をランキングします。
-   使用する先行指標：**ADR（日中値幅率）・ATR%（真の値幅率）・ADV（平均出来高）・AvgGap（平均ギャップ率）**
-   ※ PCAや過去の損益実績には依存しないため、将来のパフォーマンス予測として過適合（overfitting）しにくい設計です。
+### Model
 
-2. **1日1回限定・資金90%の「一点集中フルインベストメント」:**
-   取引回数が多いほど手数料負けするデイトレードの罠を回避するため、選抜されたトップ10銘柄の中で**「その日一番最初にブレイクアウトした1銘柄だけ」**に、総資金の90%を集中投資します。
-   エントリー窓は **09:35〜10:30 (EST)** に限定し、それを過ぎると当日はトレードなし。
+- Model: `HistGradientBoostingClassifier`
+- Feature set: **16 features**
+- Threshold per training run:
 
-3. **3段階ダイナミックエグジット（Dynamic Exit）による優れたリスク管理:**
-   固定利確・固定損切りを廃止し、以下の3-phase構造でエグジットを管理します。
-   - **フェーズ1 ブレイクイーブン移動:** 含み益が初期リスク（R）×0.75に達したらストップをエントリー価格に移動（元本保護）
-   - **フェーズ2 トレーリングストップ:** 含み益がR×1.5に達したらトレーリング開始（ストップ = 最高値 − R×0.75）
-   - **フェーズ3 EOD強制決済:** 15:55 (EST) に全株を成行売り（オーバーナイト・持ち越しリスクゼロ）
-
-4. **FMP APIによるリアルタイム価格取得:**
-   yfinance等の遅延APIを排除し、FinancialModelingPrep（FMP）の `/quote` エンドポイントを2秒間隔でポーリングします。
-
----
-
-## 📦 アーキテクチャと稼働スケジュール
-
-```
-master_scheduler.py
-├── 毎営業日 17:00 (EST) → ml_pipeline_60d.py を実行
-│     └── Ex-Ante Z-Scoreで Top 10 銘柄を選定 → top_10_watchlist.json に保存
-└── 毎営業日 09:25 (EST) → webull_live_trader.py を実行
-      ├── 09:30〜09:35: 最初の5分間（Opening Range）の高値をFMPで取得
-      ├── 09:35〜10:30: ブレイクアウト監視 → 1回だけ成行買い注文（Webull V2 API）
-      ├── エントリー後: DynamicExitStrategy（strategy.py）でティック単位の出口管理
-      └── 15:55: 未決のポジションを強制全決済
+```text
+threshold = max(0.55, 90th percentile of train_scores)
 ```
 
-**モジュール構成：**
+### Entry selection
 
-| ファイル | 役割 |
+The system does **not** pick the daily top-4 names by score in hindsight.
+
+It works like this:
+
+1. score all eligible candidates in real time
+2. keep only names with `score >= threshold`
+3. process candidates in **timestamp order**
+4. if several names appear at the same timestamp, sort by **score descending**
+5. fill until **4 positions** are used
+
+### Exit
+
+- operational assumption: **same-day close**
+- backtest/live accounting uses:
+  - commission: `0.2%` per side
+  - slippage: `5 bps` per side
+  - spread: `5 bps` round trip
+
+## 16 Live Features
+
+The deployed feature set is:
+
+1. `daily_buy_pressure_prev`
+2. `prev_day_adr_pct`
+3. `industry_buy_pressure_prev`
+4. `EMA_8_15`
+5. `distance_to_prev_day_high`
+6. `close_vs_vwap_15`
+7. `sector_buy_pressure_prev`
+8. `daily_rrs_prev`
+9. `daily_rs_score_prev`
+10. `distance_to_avwap_63_prev`
+11. `volume_spike_5m`
+12. `industry_rs_prev`
+13. `same_slot_avg_vol_20d`
+14. `rs_x_intraday_rvol`
+15. `intraday_range_expansion_vs_atr`
+16. `prev_day_close_vs_sma50`
+
+## Data Requirements
+
+### Night-before full universe data
+
+- top 3000 symbols by market cap
+- `symbol`, `exchange`, `sector`, `industry`, `market_cap`
+- split-adjusted daily OHLCV
+- `SPY` daily OHLCV
+
+### Live intraday data
+
+- current-session 5-minute OHLCV for the monitored shortlist
+- 15-minute context derived from the 5-minute stream
+
+### Historical local retention
+
+- daily bars: **300 to 400 sessions**
+- 5-minute bars: **20 to 40 sessions**
+- same-slot volume history: **20 sessions**
+
+## Storage Layout
+
+The project now uses:
+
+- **SQLite**
+  - universe metadata
+  - daily bars
+  - 5-minute bars
+  - daily feature rows
+  - shortlist rows
+  - model registry
+  - live signals / fills
+- **Parquet**
+  - raw daily snapshots
+  - raw intraday snapshots
+  - daily feature snapshots
+  - nightly shortlist snapshots
+
+Important:
+
+- pickle is no longer the primary production data format
+- Parquet is used for reproducible snapshots and research reuse
+- SQLite is used as the operational store
+
+## Main Files
+
+| File | Role |
 |---|---|
-| `config.py` | FMP / Webull 認証情報の一元管理 |
-| `strategy.py` | `DynamicExitStrategy`・`check_entry_condition()`（共通モジュール） |
-| `ml_pipeline_60d.py` | Ex-Ante Z-Scoreウォッチリスト生成（daily, 引け後実行） |
-| `webull_live_trader.py` | リアルタイム執行Bot（FMP quotes + Webull注文） |
-| `backtester.py` | `strategy.py` と同一ロジックを使用した歴史的バックテスト |
-| `master_scheduler.py` | 全スクリプトのスケジューリング司令塔 |
+| `ml_pipeline_60d.py` | Nightly pipeline entrypoint |
+| `webull_live_trader.py` | Live execution entrypoint |
+| `backtester.py` | Event-driven backtest entrypoint |
+| `master_scheduler.py` | Daily scheduler |
+| `stallion/config.py` | Runtime and path settings |
+| `stallion/storage.py` | SQLite + Parquet persistence |
+| `stallion/features.py` | Daily and intraday feature construction |
+| `stallion/modeling.py` | HistGBM training / scoring / thresholding |
+| `stallion/nightly_pipeline.py` | Universe refresh, feature build, model fit, shortlist build |
+| `stallion/live_trader.py` | Real-time polling, scoring, selection, order routing |
 
----
+## How It Runs
 
-## 🚀 構築手順（Deploy via Docker）
+### Nightly pipeline
 
-### 1. リポジトリのクローン
+```bash
+python ml_pipeline_60d.py
+```
+
+What it does:
+
+1. refresh the top-3000 universe from FMP
+2. update local daily and 5-minute history
+3. compute daily feature history
+4. build the intraday training panel
+5. train the HistGBM model
+6. save the model artifact and threshold
+7. build the next-session shortlist
+
+### Live trader
+
+```bash
+python webull_live_trader.py
+```
+
+What it does:
+
+1. load the saved model and nightly shortlist
+2. poll FMP batch quotes for the monitored symbols
+3. aggregate snapshots into the operational 5-minute store
+4. rebuild current intraday features
+5. score candidates
+6. select up to 4 names in real time
+7. route orders to Webull
+
+### Scheduler
+
+```bash
+python master_scheduler.py
+```
+
+Default schedule:
+
+- `17:00 America/New_York`: nightly pipeline
+- `09:25 America/New_York`: live trader bootstrap
+
+## Environment Variables
+
+Create `.env` from `.env.example`.
+
+```env
+FMP_API_KEY=
+WEBULL_APP_KEY=
+WEBULL_APP_SECRET=
+WEBULL_ACCOUNT_ID=
+```
+
+## Install
+
 ```bash
 git clone https://github.com/turnDeep/Stallion-System-Trade.git
 cd Stallion-System-Trade
+python -m venv .venv
+.venv\\Scripts\\activate
+pip install -r requirements.txt
 ```
 
-### 2. 環境変数（API認証情報）のセット
-プロジェクトのルートディレクトリに `.env` ファイルを作成します。
-```env
-WEBULL_APP_KEY="あなたのWebull App Key"
-WEBULL_APP_SECRET="あなたのWebull App Secret"
-WEBULL_ACCOUNT_ID="あなたのWebull 口座ID"
-FMP_API_KEY="あなたのFinancialModelingPrep API Key"
-```
+## Docker
 
-### 3. Docker Composeで一撃デプロイ
 ```bash
 docker compose up -d
 ```
-> ※ `Dockerfile` にてコンテナの内部時刻を米国（America/New_York）に強制指定しているため、サーバー側の時刻を気にする必要はありません。
 
----
+The container still uses `master_scheduler.py` as the entrypoint.
 
-## 📊 検証済みパフォーマンス（OOS Holdout）
+## Notes
 
-| 指標 | 新Baseline（固定エグジット） | 新Baseline + Dynamic Exit |
-|---|---|---|
-| 総リターン | +27.74% | +20.47% |
-| Sharpe比 | 5.13 | **5.07** |
-| 最大ドローダウン | -11.56% | **-3.97%** |
-| 手数料（片道） | 0.2% | 0.2% |
-
-> Dynamic Exitは絶対リターンをわずかに犠牲にしつつ、最大ドローダウンを大幅に圧縮します。実運用目線では**Dynamic Exit**を採用しています。
-
----
-
-## 🛠 必須要件（Requirements）
-
-* Docker および Docker Compose がインストールされたLinux環境
-* Webull証券（日本）の口座、および OpenAPI（V2 Trade）の利用権限
-* FinancialModelingPrep（FMP）のAPIキー（無料プランでも可）
-* ラッセル3000の5分足データ（`russell3000_60d_5min.pkl`）
-
----
-*Developed as an automated high-volatility ORB breakout hunting system.*
+- This repository is now oriented around the **standard daytrade live architecture**, not the old ORB Top-10 system.
+- The current live engine is intentionally simple and transparent.
+- If you want stricter market-regime blocking, crash-day filters, or a websocket collector, those can be layered on top of this base cleanly.

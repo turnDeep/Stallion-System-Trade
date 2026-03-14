@@ -18,16 +18,15 @@ def run_python_script(script_name):
     subprocess.run([sys.executable, script_name], check=True, cwd=SCRIPT_DIR)
 
 def run_daily_ml_pipeline():
-    logger.info("Starting daily ML optimization pipeline (60-day Ex-Ante Feature framework)...")
+    logger.info("Starting nightly standard daytrade pipeline...")
     try:
-        # Run the ML pipeline script to generate the new Top 10 list based on today's close
         run_python_script('ml_pipeline_60d.py')
-        logger.info("Daily ML pipeline completed successfully. Top 10 watchlist updated for tomorrow.")
+        logger.info("Nightly standard pipeline completed successfully. Shortlist and model artifacts updated.")
     except Exception as e:
         logger.error(f"Error running daily ML pipeline: {e}")
 
 def run_daily_trading_bot():
-    logger.info("Initializing daily trading bot...")
+    logger.info("Initializing live trading bot...")
     # Check if today is a weekday
     today = datetime.datetime.now(pytz.timezone('America/New_York')).weekday()
     if today >= 5: # 5=Saturday, 6=Sunday
@@ -35,8 +34,6 @@ def run_daily_trading_bot():
         return
         
     try:
-        # Run the daily trading execution script
-        # This script connects to Webull Execution but reads FMP Quotes.
         run_python_script('webull_live_trader.py')
     except Exception as e:
         logger.error(f"Daily trading bot error: {e}")
@@ -57,7 +54,7 @@ def watchlist_missing_or_empty():
 
 def run_startup_pipeline_if_needed():
     if watchlist_missing_or_empty():
-        logger.info("No startup watchlist detected. Running one-shot ML pipeline bootstrap now...")
+        logger.info("No startup shortlist detected. Running one-shot nightly pipeline bootstrap now...")
         run_daily_ml_pipeline()
         return
 
@@ -67,14 +64,14 @@ def main():
     logger.info("Starting Master Scheduler. Timezone is set to America/New_York.")
     run_startup_pipeline_if_needed()
     
-    # Schedule Daily Optimization: Every Mon-Fri at 17:00 (5:00 PM) EST
+    # Nightly batch: refresh universe, bars, daily features, training panel, model bundle, shortlist.
     schedule.every().monday.at("17:00").do(run_daily_ml_pipeline)
     schedule.every().tuesday.at("17:00").do(run_daily_ml_pipeline)
     schedule.every().wednesday.at("17:00").do(run_daily_ml_pipeline)
     schedule.every().thursday.at("17:00").do(run_daily_ml_pipeline)
     schedule.every().friday.at("17:00").do(run_daily_ml_pipeline)
     
-    # Schedule Daily Bot: Every Mon-Fri at 09:25 AM EST (to give it time to boot up before 9:30 open)
+    # Live bot: loads the saved model + shortlist and starts polling before the open.
     schedule.every().monday.at("09:25").do(run_daily_trading_bot)
     schedule.every().tuesday.at("09:25").do(run_daily_trading_bot)
     schedule.every().wednesday.at("09:25").do(run_daily_trading_bot)
