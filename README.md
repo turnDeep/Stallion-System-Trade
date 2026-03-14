@@ -2,7 +2,7 @@
 
 Language / 言語: **English** | [日本語](./README.ja.md)
 
-Stallion-System-Trade is now a **live-trading scaffold for the standard intraday Russell-3000 model**:
+Stallion-System-Trade is a **live-trading scaffold for the standard intraday Russell-3000 model**:
 
 - night-before refresh of the **top 3000 U.S. stocks by market cap**
 - daily context computed on **252+ trading days of split-adjusted daily bars**
@@ -210,6 +210,5 @@ The container still uses `master_scheduler.py` as the entrypoint.
 
 ## Notes
 
-- This repository is now oriented around the **standard daytrade live architecture**, not the old ORB Top-10 system.
 - The current live engine is intentionally simple and transparent.
 - If you want stricter market-regime blocking, crash-day filters, or a websocket collector, those can be layered on top of this base cleanly.
