@@ -2,7 +2,7 @@
 
 Language / 言語: [English](./README.md) | **日本語**
 
-Stallion-System-Trade は、現在 **標準のラッセル3000向けイントラデイ売買ロジックを実運用するための live-trading scaffold** として構成されています。
+Stallion-System-Trade は、 **標準のラッセル3000向けイントラデイ売買ロジックを実運用するための live-trading scaffold** として構成されています。
 
 - 前夜に **時価総額上位3000銘柄** を更新
 - **252営業日以上** の split-adjusted 日足から日次コンテキストを計算
@@ -210,6 +210,5 @@ docker compose up -d
 
 ## Notes
 
-- このリポジトリは、旧 ORB Top-10 システムではなく **標準 daytrade live architecture** 向けに再構成されています。
 - 現在の live engine は、意図的にシンプルで追いやすい形にしています。
 - より厳しい地合いフィルター、暴落日ブロック、websocket collector などは、この土台の上に追加できます。
