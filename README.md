@@ -1,5 +1,7 @@
 # Stallion-System-Trade
 
+Language / 言語: **English** | [日本語](./README.ja.md)
+
 Stallion-System-Trade is now a **live-trading scaffold for the standard intraday Russell-3000 model**:
 
 - night-before refresh of the **top 3000 U.S. stocks by market cap**
