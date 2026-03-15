@@ -11,6 +11,7 @@ Stallion-System-Trade is a **live-trading scaffold for the standard intraday Rus
 - model scoring with the **16-feature hist_gbm_extended 5m_start logic**
 - **next-bar open entry**, **same-day close exit**, **max 4 positions per session**
 - data persisted to **SQLite + Parquet**, not pickle
+- startup / recovery state persisted for **quotes, bars, orders, positions, heartbeats, and alerts**
 
 ## Standard Logic
 
@@ -49,10 +50,25 @@ It works like this:
 ### Exit
 
 - operational assumption: **same-day close**
+- live trader now stops taking new entries after **15:55 America/New_York**
+- live trader now sends **automatic SELL market orders** to flatten open positions starting at **15:58 America/New_York**
 - backtest/live accounting uses:
   - commission: `0.2%` per side
   - slippage: `5 bps` per side
   - spread: `5 bps` round trip
+
+### Position sizing
+
+- the system reads the **opening account equity** from Webull
+- the day budget is split into **4 equal slots**
+- each order size is:
+
+```text
+slot_budget = opening_equity / 4
+quantity = floor(slot_budget / expected_fill_price)
+```
+
+- orders are sent as **integer-share market orders**
 
 ## 16 Live Features
 
@@ -86,7 +102,8 @@ The deployed feature set is:
 
 ### Live intraday data
 
-- current-session 5-minute OHLCV for the monitored shortlist
+- current-session quote snapshots for the monitored shortlist
+- production 5-minute OHLCV is **aggregated from the quote stream**
 - 15-minute context derived from the 5-minute stream
 
 ### Historical local retention
@@ -103,10 +120,15 @@ The project now uses:
   - universe metadata
   - daily bars
   - 5-minute bars
+  - quote snapshots
   - daily feature rows
   - shortlist rows
   - model registry
   - live signals / fills
+  - live orders
+  - open positions
+  - heartbeats
+  - alerts
 - **Parquet**
   - raw daily snapshots
   - raw intraday snapshots
@@ -162,11 +184,14 @@ What it does:
 
 1. load the saved model and nightly shortlist
 2. poll FMP batch quotes for the monitored symbols
-3. aggregate snapshots into the operational 5-minute store
-4. rebuild current intraday features
-5. score candidates
-6. select up to 4 names in real time
-7. route orders to Webull
+3. persist raw quote snapshots to SQLite
+4. aggregate snapshots into production 5-minute OHLCV bars
+5. rebuild current intraday features
+6. score candidates
+7. select up to 4 names in real time
+8. size orders from opening account equity
+9. route orders to Webull
+10. reconcile order history / positions and auto-flatten before the close
 
 ### Scheduler
 
@@ -179,6 +204,16 @@ Default schedule:
 - startup bootstrap: runs the nightly pipeline once only if the SQLite + Parquet artifacts are missing or incomplete
 - `17:00 America/New_York`: nightly pipeline
 - `09:25 America/New_York`: live trader bootstrap
+
+## Broker Compatibility
+
+- the current implementation is wired for **Webull Japan** (`Region.JP`)
+- the repository assumes the provided account supports:
+  - account list
+  - account balance
+  - account positions
+  - order placement / cancellation
+- before using live trading, verify the APIs succeed with your account and credentials
 
 ## Environment Variables
 
@@ -207,7 +242,22 @@ pip install -r requirements.txt
 docker compose up -d
 ```
 
-The container still uses `master_scheduler.py` as the entrypoint.
+The container uses `master_scheduler.py` as the entrypoint and now includes a Docker healthcheck via `python -m stallion.watchdog`.
+
+## Production Notes
+
+- this repository now includes:
+  - startup bootstrap checks
+  - quote snapshot persistence
+  - production 5-minute bar aggregation
+  - opening-equity slot sizing
+  - live order / position state tables
+  - restart reconciliation against broker state
+  - stale-order cancellation
+  - automatic pre-close flattening
+  - heartbeat / alert storage
+- it still assumes your host stays online; WSL2 + Docker Desktop on a sleeping Windows machine is **not** true 24/365 infrastructure
+- for real unattended operation, use an always-on host or VPS
 
 ## Notes
 

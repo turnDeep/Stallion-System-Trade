@@ -66,6 +66,15 @@ class SQLiteParquetStore:
                     PRIMARY KEY(symbol, ts)
                 );
 
+                CREATE TABLE IF NOT EXISTS quote_snapshots (
+                    symbol TEXT NOT NULL,
+                    ts TEXT NOT NULL,
+                    price REAL,
+                    cumulative_volume REAL,
+                    payload_json TEXT NOT NULL,
+                    PRIMARY KEY(symbol, ts)
+                );
+
                 CREATE TABLE IF NOT EXISTS daily_features (
                     symbol TEXT NOT NULL,
                     session_date TEXT NOT NULL,
@@ -101,6 +110,33 @@ class SQLiteParquetStore:
                     PRIMARY KEY(session_date, timestamp, symbol)
                 );
 
+                CREATE TABLE IF NOT EXISTS live_orders (
+                    client_order_id TEXT PRIMARY KEY,
+                    session_date TEXT NOT NULL,
+                    symbol TEXT NOT NULL,
+                    side TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    filled_quantity INTEGER NOT NULL,
+                    requested_price REAL,
+                    status TEXT NOT NULL,
+                    broker_order_id TEXT,
+                    placed_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS open_positions (
+                    symbol TEXT PRIMARY KEY,
+                    session_date TEXT NOT NULL,
+                    quantity INTEGER NOT NULL,
+                    avg_price REAL,
+                    entry_time TEXT NOT NULL,
+                    broker_order_id TEXT,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
                 CREATE TABLE IF NOT EXISTS live_fills (
                     fill_id TEXT PRIMARY KEY,
                     session_date TEXT NOT NULL,
@@ -109,6 +145,28 @@ class SQLiteParquetStore:
                     timestamp TEXT NOT NULL,
                     quantity INTEGER NOT NULL,
                     price REAL NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS system_state (
+                    state_key TEXT PRIMARY KEY,
+                    state_value TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS heartbeats (
+                    component TEXT PRIMARY KEY,
+                    heartbeat_at TEXT NOT NULL,
+                    status TEXT NOT NULL,
+                    payload_json TEXT NOT NULL
+                );
+
+                CREATE TABLE IF NOT EXISTS alerts (
+                    alert_id TEXT PRIMARY KEY,
+                    created_at TEXT NOT NULL,
+                    level TEXT NOT NULL,
+                    component TEXT NOT NULL,
+                    message TEXT NOT NULL,
                     payload_json TEXT NOT NULL
                 );
                 """
@@ -228,6 +286,161 @@ class SQLiteParquetStore:
         frame = pd.DataFrame([row])
         with self._connect() as connection:
             frame.to_sql("live_fills", connection, if_exists="append", index=False, method="multi")
+
+    def append_quote_snapshots(self, frame: pd.DataFrame) -> None:
+        if frame.empty:
+            return
+        work = frame.copy()
+        work["ts"] = pd.to_datetime(work["ts"], utc=True, errors="coerce").astype(str)
+        if "payload_json" not in work.columns:
+            work["payload_json"] = work.apply(lambda row: json.dumps(row.to_dict(), ensure_ascii=True, default=str), axis=1)
+        expected = ["symbol", "ts", "price", "cumulative_volume", "payload_json"]
+        for column in expected:
+            if column not in work.columns:
+                work[column] = None
+        sql = "INSERT OR REPLACE INTO quote_snapshots (symbol, ts, price, cumulative_volume, payload_json) VALUES (?, ?, ?, ?, ?)"
+        rows = [tuple(item[column] for column in expected) for item in work[expected].to_dict(orient="records")]
+        with self._connect() as connection:
+            connection.executemany(sql, rows)
+            connection.commit()
+
+    def load_quote_snapshots(self, session_date: pd.Timestamp | None = None, symbols: Iterable[str] | None = None) -> pd.DataFrame:
+        query = "SELECT symbol, ts, price, cumulative_volume, payload_json FROM quote_snapshots"
+        clauses: list[str] = []
+        params: list[str] = []
+        if session_date is not None:
+            start = pd.Timestamp(session_date).tz_localize("America/New_York").tz_convert("UTC")
+            end = start + pd.Timedelta(days=1)
+            clauses.append("ts >= ? AND ts < ?")
+            params.extend([start.isoformat(), end.isoformat()])
+        if symbols:
+            symbol_list = tuple(sorted(set(symbols)))
+            placeholders = ",".join(["?"] * len(symbol_list))
+            clauses.append(f"symbol IN ({placeholders})")
+            params.extend(symbol_list)
+        if clauses:
+            query += " WHERE " + " AND ".join(clauses)
+        query += " ORDER BY ts ASC, symbol ASC"
+        with self._connect() as connection:
+            frame = pd.read_sql_query(query, connection, params=tuple(params))
+        if frame.empty:
+            return frame
+        frame["ts"] = pd.to_datetime(frame["ts"], utc=True, errors="coerce")
+        return frame
+
+    def upsert_live_order(self, row: dict) -> None:
+        work = pd.DataFrame([row]).copy()
+        for column in ["placed_at", "updated_at"]:
+            if column not in work.columns:
+                work[column] = pd.Timestamp.utcnow().isoformat()
+        if "payload_json" not in work.columns:
+            work["payload_json"] = work.apply(lambda item: json.dumps(item.to_dict(), ensure_ascii=True, default=str), axis=1)
+        columns = [
+            "client_order_id",
+            "session_date",
+            "symbol",
+            "side",
+            "quantity",
+            "filled_quantity",
+            "requested_price",
+            "status",
+            "broker_order_id",
+            "placed_at",
+            "updated_at",
+            "payload_json",
+        ]
+        for column in columns:
+            if column not in work.columns:
+                work[column] = None
+        sql = (
+            "INSERT OR REPLACE INTO live_orders "
+            "(client_order_id, session_date, symbol, side, quantity, filled_quantity, requested_price, status, broker_order_id, placed_at, updated_at, payload_json) "
+            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+        )
+        rows = [tuple(item[column] for column in columns) for item in work[columns].to_dict(orient="records")]
+        with self._connect() as connection:
+            connection.executemany(sql, rows)
+            connection.commit()
+
+    def load_live_orders(self, session_date: pd.Timestamp | None = None) -> pd.DataFrame:
+        query = "SELECT * FROM live_orders"
+        params: tuple = ()
+        if session_date is not None:
+            query += " WHERE session_date = ?"
+            params = (str(pd.Timestamp(session_date).date()),)
+        query += " ORDER BY placed_at ASC"
+        with self._connect() as connection:
+            return pd.read_sql_query(query, connection, params=params)
+
+    def replace_open_positions(self, frame: pd.DataFrame) -> None:
+        expected = ["symbol", "session_date", "quantity", "avg_price", "entry_time", "broker_order_id", "status", "payload_json", "updated_at"]
+        work = frame.copy()
+        for column in expected:
+            if column not in work.columns:
+                work[column] = None
+        work = work[expected].copy()
+        with self._connect() as connection:
+            connection.execute("DELETE FROM open_positions")
+            if not work.empty:
+                work.to_sql("open_positions", connection, if_exists="append", index=False, method="multi")
+
+    def load_open_positions(self) -> pd.DataFrame:
+        with self._connect() as connection:
+            return pd.read_sql_query("SELECT * FROM open_positions ORDER BY symbol ASC", connection)
+
+    def put_system_state(self, state_key: str, state_value: str) -> None:
+        row = pd.DataFrame(
+            [
+                {
+                    "state_key": state_key,
+                    "state_value": state_value,
+                    "updated_at": pd.Timestamp.utcnow().isoformat(),
+                }
+            ]
+        )
+        with self._connect() as connection:
+            connection.execute("DELETE FROM system_state WHERE state_key = ?", (state_key,))
+            row.to_sql("system_state", connection, if_exists="append", index=False, method="multi")
+
+    def get_system_state(self, state_key: str) -> str | None:
+        with self._connect() as connection:
+            row = connection.execute("SELECT state_value FROM system_state WHERE state_key = ?", (state_key,)).fetchone()
+        return row[0] if row else None
+
+    def write_heartbeat(self, component: str, status: str, payload: dict | None = None) -> None:
+        row = pd.DataFrame(
+            [
+                {
+                    "component": component,
+                    "heartbeat_at": pd.Timestamp.utcnow().isoformat(),
+                    "status": status,
+                    "payload_json": json.dumps(payload or {}, ensure_ascii=True, default=str),
+                }
+            ]
+        )
+        with self._connect() as connection:
+            connection.execute("DELETE FROM heartbeats WHERE component = ?", (component,))
+            row.to_sql("heartbeats", connection, if_exists="append", index=False, method="multi")
+
+    def append_alert(self, *, level: str, component: str, message: str, payload: dict | None = None) -> None:
+        row = pd.DataFrame(
+            [
+                {
+                    "alert_id": json.dumps([component, message, pd.Timestamp.utcnow().isoformat()]),
+                    "created_at": pd.Timestamp.utcnow().isoformat(),
+                    "level": level,
+                    "component": component,
+                    "message": message,
+                    "payload_json": json.dumps(payload or {}, ensure_ascii=True, default=str),
+                }
+            ]
+        )
+        with self._connect() as connection:
+            row.to_sql("alerts", connection, if_exists="append", index=False, method="multi")
+
+    def load_heartbeats(self) -> pd.DataFrame:
+        with self._connect() as connection:
+            return pd.read_sql_query("SELECT * FROM heartbeats ORDER BY heartbeat_at DESC", connection)
 
     def write_parquet_snapshot(self, frame: pd.DataFrame, relative_path: str) -> Path:
         destination = self.parquet_dir / relative_path
