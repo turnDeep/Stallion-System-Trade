@@ -38,6 +38,15 @@ class RuntimeConfig:
     min_dollar_volume: float = 5_000_000.0
     quote_poll_seconds: int = 15
     batch_quote_chunk_size: int = 200
+    no_new_orders_after_hour: int = 15
+    no_new_orders_after_minute: int = 55
+    flatten_positions_hour: int = 15
+    flatten_positions_minute: int = 58
+    shutdown_hour: int = 16
+    shutdown_minute: int = 5
+    order_cancel_after_seconds: int = 90
+    broker_sync_seconds: int = 60
+    watchdog_stale_seconds: int = 180
 
 
 @dataclass(frozen=True)

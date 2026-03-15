@@ -12,17 +12,21 @@ import pytz
 import schedule
 
 from stallion.config import load_settings
+from stallion.storage import SQLiteParquetStore
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 logger = logging.getLogger(__name__)
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = "hist_gbm_extended_5m_start.pkl"
+STORE = None
 
 
 def run_python_script(script_name):
     subprocess.run([sys.executable, script_name], check=True, cwd=SCRIPT_DIR)
 
 def run_daily_ml_pipeline():
+    if STORE is not None:
+        STORE.write_heartbeat("master_scheduler", "running_pipeline", {"job": "nightly_pipeline"})
     logger.info("Starting nightly standard daytrade pipeline...")
     try:
         run_python_script('ml_pipeline_60d.py')
@@ -31,6 +35,8 @@ def run_daily_ml_pipeline():
         logger.error(f"Error running daily ML pipeline: {e}")
 
 def run_daily_trading_bot():
+    if STORE is not None:
+        STORE.write_heartbeat("master_scheduler", "starting_live_trader", {"job": "live_trader"})
     logger.info("Initializing live trading bot...")
     # Check if today is a weekday
     today = datetime.datetime.now(pytz.timezone('America/New_York')).weekday()
@@ -108,6 +114,13 @@ def run_startup_pipeline_if_needed():
 
 def main():
     logger.info("Starting Master Scheduler. Timezone is set to America/New_York.")
+    global STORE
+    try:
+        STORE = SQLiteParquetStore(load_settings(SCRIPT_DIR))
+        STORE.write_heartbeat("master_scheduler", "starting", {})
+    except Exception as exc:
+        logger.error("Failed to initialize scheduler store: %s", exc)
+        STORE = None
     run_startup_pipeline_if_needed()
     
     # Nightly batch: refresh universe, bars, daily features, training panel, model bundle, shortlist.
@@ -128,6 +141,8 @@ def main():
     
     # Main infinite loop
     while True:
+        if STORE is not None:
+            STORE.write_heartbeat("master_scheduler", "idle", {})
         schedule.run_pending()
         time.sleep(60) # check every minute
 
