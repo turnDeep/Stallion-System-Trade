@@ -195,6 +195,13 @@ What it does:
 7. save the watchlist artifact plus the stage-2 HistGBM artifact
 8. build the next-session shortlist
 
+Data acquisition notes:
+
+- yfinance downloads are now chunked and rate-limit aware
+- the downloader uses `curl_cffi` sessions when available
+- failed symbols are retried with backoff before being marked unresolved
+- SQLite writes use chunked inserts to avoid `too many SQL variables`
+
 ### Live trader
 
 ```bash

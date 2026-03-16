@@ -172,18 +172,51 @@ class SQLiteParquetStore:
                 """
             )
 
+    def _sqlite_max_variable_number(self, connection: sqlite3.Connection) -> int:
+        try:
+            rows = connection.execute("PRAGMA compile_options;").fetchall()
+        except sqlite3.DatabaseError:
+            return 999
+        for (option,) in rows:
+            option_text = str(option)
+            if option_text.startswith("MAX_VARIABLE_NUMBER="):
+                try:
+                    return int(option_text.split("=", 1)[1])
+                except ValueError:
+                    return 999
+        return 999
+
+    def _frame_chunksize(self, connection: sqlite3.Connection, column_count: int, hard_cap: int = 2_000) -> int:
+        if column_count <= 0:
+            return 1
+        max_variables = max(100, self._sqlite_max_variable_number(connection) - 16)
+        return max(1, min(hard_cap, max_variables // column_count))
+
+    def _append_frame_chunked(self, connection: sqlite3.Connection, table_name: str, frame: pd.DataFrame) -> None:
+        if frame.empty:
+            return
+        chunksize = self._frame_chunksize(connection, len(frame.columns))
+        frame.to_sql(table_name, connection, if_exists="append", index=False, method="multi", chunksize=chunksize)
+
+    def _executemany_chunked(self, connection: sqlite3.Connection, sql: str, rows: list[tuple], row_width: int) -> None:
+        if not rows:
+            return
+        chunk_size = self._frame_chunksize(connection, row_width, hard_cap=5_000)
+        for start in range(0, len(rows), chunk_size):
+            connection.executemany(sql, rows[start : start + chunk_size])
+
     def _upsert_frame(self, frame: pd.DataFrame, table_name: str) -> None:
         if frame.empty:
             return
         with self._connect() as connection:
-            frame.to_sql(table_name, connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, table_name, frame)
 
     def save_universe(self, frame: pd.DataFrame) -> None:
         work = frame.copy()
         work["updated_at"] = pd.Timestamp.utcnow().isoformat()
         with self._connect() as connection:
             connection.execute("DELETE FROM universe")
-            work.to_sql("universe", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "universe", work)
         self.write_parquet_snapshot(work, "universe/latest.parquet")
 
     def save_bars(self, frame: pd.DataFrame, timeframe: str) -> None:
@@ -205,7 +238,7 @@ class SQLiteParquetStore:
         sql = f"INSERT OR REPLACE INTO {table_name} ({','.join(columns)}) VALUES ({placeholders})"
         rows = [tuple(row[column] for column in columns) for row in work.to_dict(orient="records")]
         with self._connect() as connection:
-            connection.executemany(sql, rows)
+            self._executemany_chunked(connection, sql, rows, len(columns))
             connection.commit()
         partition_label = "daily" if timeframe == "1d" else "intraday_5m"
         self.write_parquet_snapshot(work, f"raw/{partition_label}/latest.parquet")
@@ -228,7 +261,7 @@ class SQLiteParquetStore:
         work = pd.DataFrame(records)
         with self._connect() as connection:
             connection.execute("DELETE FROM daily_features")
-            work.to_sql("daily_features", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "daily_features", work)
         self.write_parquet_snapshot(frame, "features/daily/latest.parquet")
 
     def save_shortlist(self, session_date: pd.Timestamp, frame: pd.DataFrame) -> None:
@@ -254,7 +287,7 @@ class SQLiteParquetStore:
         shortlist = pd.DataFrame(records)
         with self._connect() as connection:
             connection.execute("DELETE FROM nightly_shortlist WHERE session_date = ?", (day,))
-            shortlist.to_sql("nightly_shortlist", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "nightly_shortlist", shortlist)
         self.write_parquet_snapshot(frame, f"artifacts/shortlist/{day}.parquet")
 
     def save_model_registry(self, model_name: str, created_at: pd.Timestamp, threshold: float, artifact_path: Path, metadata: dict) -> None:
@@ -271,7 +304,7 @@ class SQLiteParquetStore:
         )
         with self._connect() as connection:
             connection.execute("DELETE FROM model_registry WHERE model_name = ?", (model_name,))
-            row.to_sql("model_registry", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "model_registry", row)
 
     def append_live_signals(self, frame: pd.DataFrame) -> None:
         if frame.empty:
@@ -280,12 +313,12 @@ class SQLiteParquetStore:
         if "payload_json" not in work.columns:
             work["payload_json"] = work.apply(lambda row: json.dumps(row.to_dict(), ensure_ascii=True, default=str), axis=1)
         with self._connect() as connection:
-            work.to_sql("live_signals", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "live_signals", work)
 
     def append_live_fill(self, row: dict) -> None:
         frame = pd.DataFrame([row])
         with self._connect() as connection:
-            frame.to_sql("live_fills", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "live_fills", frame)
 
     def append_quote_snapshots(self, frame: pd.DataFrame) -> None:
         if frame.empty:
@@ -301,7 +334,7 @@ class SQLiteParquetStore:
         sql = "INSERT OR REPLACE INTO quote_snapshots (symbol, ts, price, cumulative_volume, payload_json) VALUES (?, ?, ?, ?, ?)"
         rows = [tuple(item[column] for column in expected) for item in work[expected].to_dict(orient="records")]
         with self._connect() as connection:
-            connection.executemany(sql, rows)
+            self._executemany_chunked(connection, sql, rows, len(expected))
             connection.commit()
 
     def load_quote_snapshots(self, session_date: pd.Timestamp | None = None, symbols: Iterable[str] | None = None) -> pd.DataFrame:
@@ -382,7 +415,7 @@ class SQLiteParquetStore:
         with self._connect() as connection:
             connection.execute("DELETE FROM open_positions")
             if not work.empty:
-                work.to_sql("open_positions", connection, if_exists="append", index=False, method="multi")
+                self._append_frame_chunked(connection, "open_positions", work)
 
     def load_open_positions(self) -> pd.DataFrame:
         with self._connect() as connection:
@@ -400,7 +433,7 @@ class SQLiteParquetStore:
         )
         with self._connect() as connection:
             connection.execute("DELETE FROM system_state WHERE state_key = ?", (state_key,))
-            row.to_sql("system_state", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "system_state", row)
 
     def get_system_state(self, state_key: str) -> str | None:
         with self._connect() as connection:
@@ -420,7 +453,7 @@ class SQLiteParquetStore:
         )
         with self._connect() as connection:
             connection.execute("DELETE FROM heartbeats WHERE component = ?", (component,))
-            row.to_sql("heartbeats", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "heartbeats", row)
 
     def append_alert(self, *, level: str, component: str, message: str, payload: dict | None = None) -> None:
         row = pd.DataFrame(
@@ -436,7 +469,7 @@ class SQLiteParquetStore:
             ]
         )
         with self._connect() as connection:
-            row.to_sql("alerts", connection, if_exists="append", index=False, method="multi")
+            self._append_frame_chunked(connection, "alerts", row)
 
     def load_heartbeats(self) -> pd.DataFrame:
         with self._connect() as connection:

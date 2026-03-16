@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Any, Iterable
 
@@ -9,13 +10,125 @@ import yfinance as yf
 
 from .config import Settings
 
+try:
+    from curl_cffi import requests as curl_requests
+except Exception:  # pragma: no cover - optional dependency
+    curl_requests = None
+
 
 FMP_STOCK_SCREENER_URL = "https://financialmodelingprep.com/api/v3/stock-screener"
 FMP_BATCH_QUOTE_URL = "https://financialmodelingprep.com/api/v3/quote/{symbols}"
+LOGGER = logging.getLogger(__name__)
 
 
 def _normalize_symbol(symbol: str) -> str:
     return str(symbol).strip().upper().replace(".", "-")
+
+
+def _make_yfinance_session():
+    if curl_requests is None:
+        return None
+    return curl_requests.Session(impersonate="chrome")
+
+
+def _chunk_symbols(symbols: list[str], size: int) -> list[list[str]]:
+    return [symbols[start : start + size] for start in range(0, len(symbols), size)]
+
+
+def _parse_yfinance_download(raw: pd.DataFrame, symbols: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    if raw.empty:
+        return pd.DataFrame(), list(symbols)
+
+    frames: list[pd.DataFrame] = []
+    found_symbols: set[str] = set()
+    if isinstance(raw.columns, pd.MultiIndex):
+        for symbol in symbols:
+            if symbol not in raw.columns.get_level_values(0):
+                continue
+            part = raw[symbol].dropna(how="all").copy()
+            if part.empty:
+                continue
+            part.columns = [str(col).lower().replace(" ", "_") for col in part.columns]
+            part["symbol"] = symbol
+            part["ts"] = pd.to_datetime(part.index, utc=True, errors="coerce")
+            frames.append(part.reset_index(drop=True))
+            found_symbols.add(symbol)
+    else:
+        part = raw.dropna(how="all").copy()
+        if not part.empty:
+            symbol = symbols[0]
+            part.columns = [str(col).lower().replace(" ", "_") for col in part.columns]
+            part["symbol"] = symbol
+            part["ts"] = pd.to_datetime(part.index, utc=True, errors="coerce")
+            frames.append(part.reset_index(drop=True))
+            found_symbols.add(symbol)
+
+    if not frames:
+        return pd.DataFrame(), list(symbols)
+    frame = pd.concat(frames, ignore_index=True)
+    expected = ["open", "high", "low", "close", "adj_close", "volume", "symbol", "ts"]
+    for column in set(expected).difference(frame.columns):
+        frame[column] = pd.NA
+    missing = [symbol for symbol in symbols if symbol not in found_symbols]
+    return frame[[*expected]], missing
+
+
+def _download_yfinance_batch(
+    symbols: list[str],
+    *,
+    period: str,
+    interval: str,
+    auto_adjust: bool,
+    session,
+    timeout: int,
+) -> tuple[pd.DataFrame, list[str]]:
+    raw = yf.download(
+        tickers=" ".join(symbols),
+        period=period,
+        interval=interval,
+        auto_adjust=auto_adjust,
+        group_by="ticker",
+        progress=False,
+        threads=False,
+        prepost=False,
+        timeout=timeout,
+        session=session,
+        multi_level_index=True,
+    )
+    return _parse_yfinance_download(raw, symbols)
+
+
+def _download_yfinance_single_with_retry(
+    symbol: str,
+    *,
+    period: str,
+    interval: str,
+    auto_adjust: bool,
+    session,
+    timeout: int,
+    retry_delays: tuple[float, ...],
+) -> pd.DataFrame:
+    last_frame = pd.DataFrame()
+    for attempt, delay in enumerate((0.0, *retry_delays), start=1):
+        if delay > 0:
+            time.sleep(delay)
+        try:
+            frame, missing = _download_yfinance_batch(
+                [symbol],
+                period=period,
+                interval=interval,
+                auto_adjust=auto_adjust,
+                session=session,
+                timeout=timeout,
+            )
+        except Exception as exc:  # pragma: no cover - network variance
+            LOGGER.warning("yfinance single download failed for %s on attempt %s: %s", symbol, attempt, exc)
+            session = _make_yfinance_session()
+            continue
+        last_frame = frame
+        if not frame.empty and not missing:
+            return frame
+    return last_frame
 
 
 class FMPClient:
@@ -94,43 +207,106 @@ class FMPClient:
 def download_yfinance_bars(symbols: list[str], period: str, interval: str, auto_adjust: bool = False) -> pd.DataFrame:
     if not symbols:
         return pd.DataFrame()
-    raw = yf.download(
-        tickers=" ".join(symbols),
-        period=period,
-        interval=interval,
-        auto_adjust=auto_adjust,
-        group_by="ticker",
-        progress=False,
-        threads=True,
-        prepost=False,
-    )
-    if raw.empty:
-        return pd.DataFrame()
 
+    normalized_symbols = [_normalize_symbol(symbol) for symbol in symbols if str(symbol).strip()]
+    deduped_symbols = list(dict.fromkeys(normalized_symbols))
+
+    is_intraday = interval.endswith("m") or interval.endswith("h")
+    chunk_size = 25 if is_intraday else 100
+    inter_chunk_sleep = 1.5 if is_intraday else 0.5
+    retry_delays = (5.0, 12.0, 25.0) if is_intraday else (2.0, 5.0, 10.0)
+    timeout = 30 if is_intraday else 20
+
+    session = _make_yfinance_session()
     frames: list[pd.DataFrame] = []
-    if isinstance(raw.columns, pd.MultiIndex):
-        for symbol in symbols:
-            if symbol not in raw.columns.get_level_values(0):
-                continue
-            part = raw[symbol].dropna(how="all").copy()
-            if part.empty:
-                continue
-            part.columns = [str(col).lower().replace(" ", "_") for col in part.columns]
-            part["symbol"] = symbol
-            part["ts"] = pd.to_datetime(part.index, utc=True, errors="coerce")
-            frames.append(part.reset_index(drop=True))
-    else:
-        part = raw.dropna(how="all").copy()
-        part.columns = [str(col).lower().replace(" ", "_") for col in part.columns]
-        part["symbol"] = symbols[0]
-        part["ts"] = pd.to_datetime(part.index, utc=True, errors="coerce")
-        frames.append(part.reset_index(drop=True))
+    missing_symbols: list[str] = []
+    symbol_chunks = _chunk_symbols(deduped_symbols, chunk_size)
 
-    if not frames:
-        return pd.DataFrame()
-    frame = pd.concat(frames, ignore_index=True)
-    expected = ["open", "high", "low", "close", "adj_close", "volume", "symbol", "ts"]
-    missing = set(expected).difference(frame.columns)
-    for column in missing:
-        frame[column] = pd.NA
-    return frame[[*expected]]
+    LOGGER.info(
+        "Downloading yfinance bars: interval=%s period=%s symbols=%s chunks=%s chunk_size=%s session=%s",
+        interval,
+        period,
+        len(deduped_symbols),
+        len(symbol_chunks),
+        chunk_size,
+        "curl_cffi" if session is not None else "default",
+    )
+
+    for chunk_idx, chunk_symbols in enumerate(symbol_chunks, start=1):
+        last_missing = list(chunk_symbols)
+        chunk_frame = pd.DataFrame()
+        for attempt, delay in enumerate((0.0, *retry_delays), start=1):
+            if delay > 0:
+                time.sleep(delay)
+            try:
+                chunk_frame, last_missing = _download_yfinance_batch(
+                    chunk_symbols,
+                    period=period,
+                    interval=interval,
+                    auto_adjust=auto_adjust,
+                    session=session,
+                    timeout=timeout,
+                )
+            except Exception as exc:  # pragma: no cover - network variance
+                LOGGER.warning(
+                    "yfinance batch failed interval=%s chunk=%s/%s attempt=%s symbols=%s: %s",
+                    interval,
+                    chunk_idx,
+                    len(symbol_chunks),
+                    attempt,
+                    len(chunk_symbols),
+                    exc,
+                )
+                session = _make_yfinance_session()
+                continue
+            if not last_missing:
+                break
+            LOGGER.warning(
+                "yfinance missing %s/%s symbols in chunk %s/%s attempt=%s interval=%s",
+                len(last_missing),
+                len(chunk_symbols),
+                chunk_idx,
+                len(symbol_chunks),
+                attempt,
+                interval,
+            )
+        if not chunk_frame.empty:
+            frames.append(chunk_frame)
+        if last_missing:
+            missing_symbols.extend(last_missing)
+        time.sleep(inter_chunk_sleep)
+
+    recovered_frames: list[pd.DataFrame] = []
+    still_missing: list[str] = []
+    for symbol in dict.fromkeys(missing_symbols):
+        frame = _download_yfinance_single_with_retry(
+            symbol,
+            period=period,
+            interval=interval,
+            auto_adjust=auto_adjust,
+            session=session,
+            timeout=timeout,
+            retry_delays=retry_delays,
+        )
+        if frame.empty:
+            still_missing.append(symbol)
+        else:
+            recovered_frames.append(frame)
+        time.sleep(max(1.0, inter_chunk_sleep))
+
+    if frames or recovered_frames:
+        frame = pd.concat([*frames, *recovered_frames], ignore_index=True)
+        frame = frame.dropna(subset=["ts"]).drop_duplicates(subset=["symbol", "ts"], keep="last")
+        frame = frame.sort_values(["symbol", "ts"]).reset_index(drop=True)
+    else:
+        frame = pd.DataFrame(columns=["open", "high", "low", "close", "adj_close", "volume", "symbol", "ts"])
+
+    if still_missing:
+        preview = still_missing[:25]
+        LOGGER.warning(
+            "yfinance unresolved symbols interval=%s count=%s preview=%s",
+            interval,
+            len(still_missing),
+            preview,
+        )
+    return frame
