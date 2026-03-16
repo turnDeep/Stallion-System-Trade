@@ -4,6 +4,5 @@ __pycache__/
 .env
 data/
 reports/
-top_10_watchlist.json
 russell3000_5min.pkl
 russell3000_60d_5min.pkl
