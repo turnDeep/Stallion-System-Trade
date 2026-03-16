@@ -7,11 +7,24 @@ from pathlib import Path
 import pandas as pd
 
 from .config import Settings, load_settings
-from .features import build_daily_feature_history, build_intraday_feature_panel, build_training_labels
+from .features import build_daily_feature_history
 from .fmp import FMPClient, download_yfinance_bars
 from .modeling import fit_hist_gbm, save_model_bundle
 from .storage import SQLiteParquetStore
 from .strategy import StandardSystemSpec
+from .watchlist_model import (
+    build_legacy_watchlist,
+    build_next_session_watchlist,
+    build_stage2_intraday_panel,
+    build_watchlist_training_panel,
+    evaluate_watchlist_model_cv,
+    make_watchlist_labels,
+    make_watchlist_model_spec,
+    save_watchlist_model,
+    score_watchlist_universe,
+    train_watchlist_model,
+    write_watchlist_reports,
+)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -21,24 +34,6 @@ def _latest_session_date(feature_frame: pd.DataFrame) -> pd.Timestamp:
     if feature_frame.empty:
         raise ValueError("No daily feature rows available.")
     return pd.to_datetime(feature_frame["session_date"]).max().normalize()
-
-
-def _build_shortlist(daily_features: pd.DataFrame, session_date: pd.Timestamp, shortlist_count: int) -> pd.DataFrame:
-    latest = daily_features.loc[pd.to_datetime(daily_features["session_date"]).eq(session_date)].copy()
-    if latest.empty:
-        return latest
-    latest["shortlist_score"] = (
-        latest["daily_buy_pressure_prev"].rank(pct=True).fillna(0.0) * 0.20
-        + latest["daily_rs_score_prev"].rank(pct=True).fillna(0.0) * 0.25
-        + latest["daily_rrs_prev"].rank(pct=True).fillna(0.0) * 0.20
-        + latest["prev_day_adr_pct"].rank(pct=True).fillna(0.0) * 0.10
-        + latest["industry_buy_pressure_prev"].rank(pct=True).fillna(0.0) * 0.10
-        + latest["sector_buy_pressure_prev"].rank(pct=True).fillna(0.0) * 0.05
-        + latest["industry_rs_prev"].rank(pct=True).fillna(0.0) * 0.10
-    )
-    latest = latest.sort_values(["shortlist_score", "daily_rs_score_prev"], ascending=[False, False]).head(shortlist_count).copy()
-    latest["rank_order"] = range(1, len(latest) + 1)
-    return latest
 
 
 def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
@@ -63,8 +58,9 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     daily_bars = download_yfinance_bars(symbols + benchmark_symbols, period="2y", interval="1d")
     store.save_bars(daily_bars, timeframe="1d")
 
+    intraday_period_days = min(60, max(settings.runtime.intraday_history_sessions, settings.runtime.training_sessions))
     LOGGER.info("Downloading 5m bars via yfinance for %s symbols", len(symbols))
-    intraday_bars = download_yfinance_bars(symbols, period=f"{min(60, settings.runtime.intraday_history_sessions)}d", interval="5m")
+    intraday_bars = download_yfinance_bars(symbols, period=f"{intraday_period_days}d", interval="5m")
     intraday_bars["cumulative_volume"] = intraday_bars["volume"]
     store.save_bars(intraday_bars, timeframe="5m")
 
@@ -72,18 +68,8 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     daily_features = build_daily_feature_history(daily_bars, universe, spy_symbol="SPY")
     store.save_daily_features(daily_features)
 
-    LOGGER.info("Building intraday training panel")
-    intraday_features = build_intraday_feature_panel(intraday_bars, daily_features, same_slot_lookback_sessions=settings.runtime.same_slot_lookback_sessions)
-    intraday_features = intraday_features[intraday_features["session_bucket"].eq("open_drive")].copy()
-    intraday_features = intraday_features[intraday_features["minutes_from_open"].between(spec.min_minutes_from_open, spec.max_minutes_from_open, inclusive="both")].copy()
-    labeled = build_training_labels(
-        intraday_features,
-        commission_rate_one_way=settings.costs.commission_rate_one_way,
-        slippage_bps_per_side=settings.costs.slippage_bps_per_side,
-        spread_bps_round_trip=settings.costs.spread_bps_round_trip,
-        adverse_fill_floor=settings.costs.extra_adverse_fill_floor,
-        adverse_fill_cap=settings.costs.extra_adverse_fill_cap,
-    )
+    LOGGER.info("Building stage-2 intraday training panel")
+    labeled = build_stage2_intraday_panel(intraday_bars, daily_features, settings)
 
     if len(labeled) > spec.max_train_rows:
         labeled = labeled.tail(spec.max_train_rows).copy()
@@ -100,9 +86,67 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
         metadata={"feature_count": len(bundle.feature_columns), "training_rows": len(labeled)},
     )
 
+    LOGGER.info("Building watchlist training dataset")
+    watchlist_spec = make_watchlist_model_spec(settings)
+    watchlist_labels = make_watchlist_labels(daily_features, daily_bars, labeled)
+    watchlist_training_panel = build_watchlist_training_panel(daily_features, watchlist_labels)
+    store.write_parquet_snapshot(watchlist_training_panel, "artifacts/watchlist_training_panel/latest.parquet")
+
     latest_date = _latest_session_date(daily_features)
-    shortlist = _build_shortlist(daily_features, latest_date, settings.runtime.shortlist_count)
-    store.save_shortlist(latest_date, shortlist)
+    legacy_shortlist = build_legacy_watchlist(daily_features, latest_date, settings.runtime.shortlist_count)
+    shortlist = legacy_shortlist.copy()
+    watchlist_model_path = settings.paths.model_dir / "watchlist_logreg_top400.pkl"
+    watchlist_report_paths: dict[str, Path] = {}
+
+    if watchlist_training_panel.empty:
+        LOGGER.warning("Watchlist training panel is empty. Falling back to legacy shortlist.")
+    else:
+        LOGGER.info("Running watchlist OOS comparison")
+        watchlist_outputs = evaluate_watchlist_model_cv(
+            watchlist_training_panel,
+            daily_features,
+            labeled,
+            settings,
+            watchlist_spec,
+        )
+        watchlist_report_paths = write_watchlist_reports(settings.paths.reports_dir / "watchlist_model", watchlist_outputs, watchlist_spec)
+        try:
+            watchlist_model, watchlist_bundle = train_watchlist_model(watchlist_training_panel, watchlist_spec)
+            watchlist_bundle = save_watchlist_model(watchlist_model, watchlist_bundle, watchlist_model_path)
+            store.save_model_registry(
+                model_name=watchlist_bundle.model_name,
+                created_at=watchlist_bundle.created_at,
+                threshold=0.0,
+                artifact_path=watchlist_bundle.artifact_path,
+                metadata={
+                    **watchlist_bundle.metadata,
+                    "feature_count": len(watchlist_bundle.feature_columns),
+                    "label_mode": watchlist_bundle.label_mode,
+                    "shortlist_mode": settings.runtime.shortlist_mode,
+                    "report_path": str(watchlist_report_paths.get("watchlist_model_report.md", "")),
+                },
+            )
+            latest_watchlist_frame = (
+                daily_features.loc[pd.to_datetime(daily_features["session_date"]).eq(latest_date), ["session_date", "symbol", *watchlist_spec.feature_columns]]
+                .rename(columns={"session_date": "feature_date"})
+                .copy()
+            )
+            latest_watchlist_frame["feature_date"] = pd.to_datetime(latest_watchlist_frame["feature_date"]).dt.normalize()
+            scored_watchlist = score_watchlist_universe(watchlist_model, watchlist_bundle, latest_watchlist_frame)
+            shortlist = build_next_session_watchlist(scored_watchlist, settings.runtime.shortlist_count)
+            if settings.runtime.shortlist_mode.strip().lower() == "legacy":
+                shortlist = legacy_shortlist.copy()
+            else:
+                shortlist["session_date"] = latest_date
+                shortlist["next_session_date"] = latest_date + pd.offsets.BDay(1)
+        except Exception:
+            LOGGER.exception("Watchlist model training/scoring failed. Falling back to legacy shortlist.")
+            shortlist = legacy_shortlist.copy()
+
+    shortlist_session_key = latest_date
+    if "next_session_date" in shortlist.columns and shortlist["next_session_date"].notna().any():
+        shortlist_session_key = pd.to_datetime(shortlist["next_session_date"]).dropna().min().normalize()
+    store.save_shortlist(shortlist_session_key, shortlist)
     shortlist.to_parquet(settings.paths.watchlist_path, index=False)
 
     report_path = settings.paths.reports_dir / "nightly_pipeline_report.json"
@@ -115,7 +159,12 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
         "shortlist_count": int(len(shortlist)),
         "threshold": threshold,
         "model_path": str(model_path),
+        "watchlist_model_path": str(watchlist_model_path),
+        "watchlist_label_mode": watchlist_spec.label_mode,
+        "shortlist_mode": settings.runtime.shortlist_mode,
         "watchlist_path": str(settings.paths.watchlist_path),
+        "shortlist_session_key": str(pd.Timestamp(shortlist_session_key).date()),
+        "watchlist_report_paths": {key: str(path) for key, path in watchlist_report_paths.items()},
     }
     report_path.write_text(json.dumps(report, indent=2), encoding="utf-8")
 

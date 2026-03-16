@@ -23,12 +23,17 @@ class CostConfig:
 class RuntimeConfig:
     market_timezone: str = "America/New_York"
     top_n_universe: int = 3000
+    shortlist_mode: str = "watchlist_model"
     shortlist_count: int = 400
     monitor_count: int = 500
     daily_history_days: int = 400
     intraday_history_sessions: int = 40
     same_slot_lookback_sessions: int = 20
     training_sessions: int = 60
+    watchlist_label_mode: str = "trade_and_profit"
+    watchlist_cv_folds: int = 5
+    watchlist_cv_min_train_sessions: int = 15
+    watchlist_cv_embargo_sessions: int = 1
     max_positions: int = 4
     min_minutes_from_open: int = 5
     max_minutes_from_open: int = 90

@@ -2,9 +2,10 @@
 
 Language / 言語: **English** | [日本語](./README.ja.md)
 
-Stallion-System-Trade is now a **live-trading scaffold for the standard intraday Russell-3000 model**:
+Stallion-System-Trade is now a **two-stage live-trading scaffold for the standard intraday Russell-3000 model**:
 
 - night-before refresh of the **top 3000 U.S. stocks by market cap**
+- stage-1 nightly **watchlist model** on 7 daily features to select the next-session top 400 shortlist
 - daily context computed on **252+ trading days of split-adjusted daily bars**
 - intraday monitoring on **5-minute bars**
 - 15-minute context derived from the 5-minute stream
@@ -27,9 +28,9 @@ The production system is aligned to the standard logic used in the current resea
 
 ### Model
 
-- Model: `HistGradientBoostingClassifier`
-- Feature set: **16 features**
-- Threshold per training run:
+- Stage 1 shortlist model: `LogisticRegression` on **7 daily features**
+- Stage 2 execution model: `HistGradientBoostingClassifier` on **16 intraday features**
+- Stage 2 threshold per training run:
 
 ```text
 threshold = max(0.55, 90th percentile of train_scores)
@@ -46,6 +47,15 @@ It works like this:
 3. process candidates in **timestamp order**
 4. if several names appear at the same timestamp, sort by **score descending**
 5. fill until **4 positions** are used
+
+### Shortlist modes
+
+- `watchlist_model`
+  - default
+  - learns the stage-1 top-400 watchlist from the 7 daily features
+- `legacy`
+  - fallback mode
+  - uses the original hand-weighted shortlist formula
 
 ### Exit
 
@@ -90,6 +100,16 @@ The deployed feature set is:
 14. `rs_x_intraday_rvol`
 15. `intraday_range_expansion_vs_atr`
 16. `prev_day_close_vs_sma50`
+
+## 7 Watchlist Features
+
+1. `daily_buy_pressure_prev`
+2. `daily_rs_score_prev`
+3. `daily_rrs_prev`
+4. `prev_day_adr_pct`
+5. `industry_buy_pressure_prev`
+6. `sector_buy_pressure_prev`
+7. `industry_rs_prev`
 
 ## Data Requirements
 
@@ -171,8 +191,9 @@ What it does:
 3. compute daily feature history
 4. build the intraday training panel
 5. train the HistGBM model
-6. save the model artifact and threshold
-7. build the next-session shortlist
+6. train the nightly watchlist model and write OOS comparison reports
+7. save the watchlist artifact plus the stage-2 HistGBM artifact
+8. build the next-session shortlist
 
 ### Live trader
 
