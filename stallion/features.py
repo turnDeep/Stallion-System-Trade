@@ -263,7 +263,9 @@ def build_intraday_feature_panel(
         fifteen = frame.loc[boundary_mask, ["timestamp", "close"]].copy()
         fifteen["EMA_8_15"] = _ema(fifteen["close"], 8)
         frame = frame.merge(fifteen[["timestamp", "EMA_8_15"]], on="timestamp", how="left")
-        frame["EMA_8_15"] = frame.groupby("session_date", sort=False)["EMA_8_15"].ffill()
+        # Preserve the pre-chunk semantics: carry the last 15m EMA forward across session boundaries
+        # until the first 15m boundary of the new session is available.
+        frame["EMA_8_15"] = frame["EMA_8_15"].ffill()
 
         frame["same_slot_avg_vol_20d"] = (
             frame.groupby("slot_index", sort=False)["volume"]
