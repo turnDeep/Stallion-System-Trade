@@ -67,12 +67,12 @@ It works like this:
 
 ### Position sizing
 
-- the system reads the **opening account equity** from Webull
+- the system reads the **opening account buying power** from Webull
 - the day budget is split into **4 equal slots**
 - each order size is:
 
 ```text
-slot_budget = opening_equity / 4
+slot_budget = opening_buying_power / 4
 quantity = floor(slot_budget / expected_fill_price)
 ```
 
@@ -217,7 +217,7 @@ What it does:
 5. rebuild current intraday features
 6. score candidates
 7. select up to 4 names in real time
-8. size orders from opening account equity
+8. size orders from opening account buying power
 9. route orders to Webull
 10. reconcile order history / positions and auto-flatten before the close
 

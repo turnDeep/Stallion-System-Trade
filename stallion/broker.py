@@ -140,17 +140,26 @@ class WebullBroker:
             raise RuntimeError("Unexpected account balance payload.")
         return payload
 
-    def get_account_equity(self) -> float:
+    def get_account_buying_power(self) -> float:
         payload = self.get_account_balance_raw()
-        direct = _as_float(payload.get("total_asset_currency"))
+        direct = _as_float(payload.get("buying_power"))
         if direct is not None and direct > 0:
             return direct
 
-        cash = _as_float(payload.get("total_cash_balance")) or 0.0
-        upl = _as_float(payload.get("total_unrealized_profit_loss")) or 0.0
-        fallback = cash + upl
-        if fallback > 0:
-            return fallback
+        nested_direct = _as_float(
+            _find_nested(
+                payload,
+                (
+                    "buying_power",
+                    "cash_buying_power",
+                    "daytrade_buying_power",
+                    "overnight_buying_power",
+                    "available_buying_power",
+                ),
+            )
+        )
+        if nested_direct is not None and nested_direct > 0:
+            return nested_direct
 
         asset_rows = payload.get("account_currency_assets") or []
         if isinstance(asset_rows, list):
@@ -163,6 +172,24 @@ class WebullBroker:
                 cash_balance = _as_float(row.get("cash_balance"))
                 if cash_balance is not None and cash_balance > 0:
                     return cash_balance
+
+        cash = _as_float(payload.get("total_cash_balance"))
+        if cash is not None and cash > 0:
+            return cash
+
+        raise RuntimeError("Could not derive buying power from Webull balance payload.")
+
+    def get_account_equity(self) -> float:
+        payload = self.get_account_balance_raw()
+        direct = _as_float(payload.get("total_asset_currency"))
+        if direct is not None and direct > 0:
+            return direct
+
+        cash = _as_float(payload.get("total_cash_balance")) or 0.0
+        upl = _as_float(payload.get("total_unrealized_profit_loss")) or 0.0
+        fallback = cash + upl
+        if fallback > 0:
+            return fallback
 
         raise RuntimeError("Could not derive account equity from Webull balance payload.")
 

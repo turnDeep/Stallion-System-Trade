@@ -113,14 +113,14 @@ def _derive_positions_from_orders(orders: pd.DataFrame, session_date: pd.Timesta
     return grouped[["symbol", "session_date", "quantity", "avg_price", "entry_time", "broker_order_id", "status", "payload_json", "updated_at"]]
 
 
-def _load_or_fetch_opening_equity(store: SQLiteParquetStore, broker: WebullBroker, session_date: pd.Timestamp) -> float:
-    state_key = f"opening_equity:{pd.Timestamp(session_date).date()}"
+def _load_or_fetch_opening_buying_power(store: SQLiteParquetStore, broker: WebullBroker, session_date: pd.Timestamp) -> float:
+    state_key = f"opening_buying_power:{pd.Timestamp(session_date).date()}"
     cached = store.get_system_state(state_key)
     if cached:
         return float(cached)
-    opening_equity = broker.get_account_equity()
-    store.put_system_state(state_key, str(opening_equity))
-    return float(opening_equity)
+    opening_buying_power = broker.get_account_buying_power()
+    store.put_system_state(state_key, str(opening_buying_power))
+    return float(opening_buying_power)
 
 
 def _compute_order_quantity(slot_budget: float, expected_fill_price: float) -> int:
@@ -310,7 +310,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
     LOGGER.info("Loaded %s monitored symbols for live trading", len(symbols))
     last_broker_sync_at = pd.Timestamp("1970-01-01", tz="UTC")
     flattened_today = False
-    opening_equity: float | None = None
+    opening_buying_power: float | None = None
 
     while True:
         now_ny = _ny_now(settings)
@@ -333,8 +333,8 @@ def run_live_trader(settings: Settings | None = None) -> None:
             time.sleep(15)
             continue
 
-        if opening_equity is None and _after_cutoff(now_ny, 9, 30):
-            opening_equity = _load_or_fetch_opening_equity(store, broker, today)
+        if opening_buying_power is None and _after_cutoff(now_ny, 9, 30):
+            opening_buying_power = _load_or_fetch_opening_buying_power(store, broker, today)
 
         if (now_utc - last_broker_sync_at).total_seconds() >= settings.runtime.broker_sync_seconds:
             live_orders, open_positions = _reconcile_orders_and_positions(store, broker, today)
@@ -383,7 +383,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
         if finalized.empty:
             time.sleep(settings.runtime.quote_poll_seconds)
             continue
-        if opening_equity is None:
+        if opening_buying_power is None:
             time.sleep(settings.runtime.quote_poll_seconds)
             continue
 
@@ -423,7 +423,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
         open_positions = store.load_open_positions()
         active_symbols = _active_order_symbols(live_orders) | set(open_positions.get("symbol", pd.Series(dtype="object")).astype(str).str.upper())
         executed_symbols = _executed_buy_symbols(live_orders)
-        slot_budget = opening_equity / spec.max_positions
+        slot_budget = opening_buying_power / spec.max_positions
         open_count = len(active_symbols)
 
         for row in selected.itertuples(index=False):
