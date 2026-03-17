@@ -1,13 +1,18 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
+import time
 from pathlib import Path
 from typing import Iterable
 
 import pandas as pd
 
 from .config import Settings
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 class SQLiteParquetStore:
@@ -18,9 +23,11 @@ class SQLiteParquetStore:
         self._initialize()
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.sqlite_path)
+        connection = sqlite3.connect(self.sqlite_path, timeout=60.0)
         connection.execute("PRAGMA journal_mode=WAL;")
         connection.execute("PRAGMA synchronous=NORMAL;")
+        connection.execute("PRAGMA busy_timeout=60000;")
+        connection.execute("PRAGMA temp_store=MEMORY;")
         return connection
 
     def _initialize(self) -> None:
@@ -198,12 +205,47 @@ class SQLiteParquetStore:
         chunksize = self._frame_chunksize(connection, len(frame.columns))
         frame.to_sql(table_name, connection, if_exists="append", index=False, method="multi", chunksize=chunksize)
 
-    def _executemany_chunked(self, connection: sqlite3.Connection, sql: str, rows: list[tuple], row_width: int) -> None:
+    def _executemany_chunked(
+        self,
+        connection: sqlite3.Connection,
+        sql: str,
+        rows: list[tuple],
+        row_width: int,
+        *,
+        commit_every_chunks: int = 25,
+        retry_attempts: int = 3,
+    ) -> None:
         if not rows:
             return
         chunk_size = self._frame_chunksize(connection, row_width, hard_cap=5_000)
-        for start in range(0, len(rows), chunk_size):
-            connection.executemany(sql, rows[start : start + chunk_size])
+        total_chunks = (len(rows) + chunk_size - 1) // chunk_size
+        for chunk_index, start in enumerate(range(0, len(rows), chunk_size), start=1):
+            chunk_rows = rows[start : start + chunk_size]
+            for attempt in range(1, retry_attempts + 1):
+                try:
+                    connection.executemany(sql, chunk_rows)
+                    break
+                except sqlite3.OperationalError as exc:
+                    if "disk i/o error" not in str(exc).lower() or attempt >= retry_attempts:
+                        raise
+                    try:
+                        connection.rollback()
+                    except sqlite3.DatabaseError:
+                        pass
+                    LOGGER.warning(
+                        "SQLite disk I/O error on chunk %s/%s, retrying attempt %s/%s",
+                        chunk_index,
+                        total_chunks,
+                        attempt,
+                        retry_attempts,
+                    )
+                    time.sleep(float(attempt))
+            if chunk_index % max(1, commit_every_chunks) == 0:
+                connection.commit()
+                try:
+                    connection.execute("PRAGMA wal_checkpoint(PASSIVE);")
+                except sqlite3.DatabaseError:
+                    pass
 
     def _upsert_frame(self, frame: pd.DataFrame, table_name: str) -> None:
         if frame.empty:
@@ -238,7 +280,14 @@ class SQLiteParquetStore:
         sql = f"INSERT OR REPLACE INTO {table_name} ({','.join(columns)}) VALUES ({placeholders})"
         rows = [tuple(row[column] for column in columns) for row in work.to_dict(orient="records")]
         with self._connect() as connection:
-            self._executemany_chunked(connection, sql, rows, len(columns))
+            self._executemany_chunked(
+                connection,
+                sql,
+                rows,
+                len(columns),
+                commit_every_chunks=5 if timeframe == "5m" else 25,
+                retry_attempts=5 if timeframe == "5m" else 3,
+            )
             connection.commit()
         partition_label = "daily" if timeframe == "1d" else "intraday_5m"
         self.write_parquet_snapshot(work, f"raw/{partition_label}/latest.parquet")

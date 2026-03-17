@@ -12,7 +12,8 @@ services:
     env_file:
       - .env
     volumes:
-      - ./:/app
+      - stallion-data:/app/data
+      - stallion-reports:/app/reports
     healthcheck:
       test: ["CMD", "python", "-m", "stallion.watchdog"]
       interval: 60s
@@ -20,3 +21,7 @@ services:
       retries: 3
       start_period: 900s
     command: python master_scheduler.py
+
+volumes:
+  stallion-data:
+  stallion-reports:
