@@ -46,6 +46,13 @@ def _anchored_vwap(high: pd.Series, low: pd.Series, close: pd.Series, volume: pd
     return result
 
 
+def _normalize_session_dates(values) -> pd.Series:
+    series = pd.to_datetime(pd.Series(values), errors="coerce")
+    if getattr(series.dt, "tz", None) is not None:
+        series = series.dt.tz_localize(None)
+    return series.dt.normalize()
+
+
 def build_daily_feature_history(daily_bars: pd.DataFrame, universe: pd.DataFrame, spy_symbol: str = "SPY") -> pd.DataFrame:
     if daily_bars.empty or universe.empty:
         return pd.DataFrame(columns=["session_date", "symbol", *STANDARD_FEATURE_COLUMNS, "prev_day_high", "prev_day_atr14"])
@@ -207,7 +214,7 @@ def build_intraday_feature_panel(
     work = work[[column for column in keep_columns if column in work.columns]].copy()
     work["timestamp"] = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert("America/New_York")
     work = work.dropna(subset=["timestamp"]).sort_values(["symbol", "timestamp"]).reset_index(drop=True)
-    work["session_date"] = work["timestamp"].dt.normalize()
+    work["session_date"] = _normalize_session_dates(work["timestamp"])
     open_minutes = work["timestamp"].dt.hour * 60 + work["timestamp"].dt.minute
     work["minutes_from_open"] = open_minutes - (9 * 60 + 30)
     work = work[work["minutes_from_open"] >= 0].copy()
@@ -230,7 +237,7 @@ def build_intraday_feature_panel(
         "prev_day_atr14",
     ]
     daily = daily_features[daily_lookup_columns].copy()
-    daily["session_date"] = pd.to_datetime(daily["session_date"]).dt.normalize()
+    daily["session_date"] = _normalize_session_dates(daily["session_date"])
 
     def _downcast_frame(frame: pd.DataFrame) -> pd.DataFrame:
         if frame.empty:

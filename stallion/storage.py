@@ -586,6 +586,8 @@ class SQLiteParquetStore:
         if frame.empty:
             return frame
         payload = frame["payload_json"].apply(json.loads).apply(pd.Series)
-        merged = pd.concat([frame.drop(columns=["payload_json"]), payload], axis=1)
+        base = frame.drop(columns=["payload_json"])
+        payload = payload.drop(columns=[column for column in payload.columns if column in base.columns], errors="ignore")
+        merged = pd.concat([base, payload], axis=1)
         merged["session_date"] = pd.to_datetime(merged["session_date"])
         return merged

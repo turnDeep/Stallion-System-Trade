@@ -99,7 +99,7 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
         raise RuntimeError("Watchlist training panel is empty; cannot build nightly shortlist model.")
 
     latest_date = _latest_session_date(daily_features)
-    watchlist_model_path = settings.paths.model_dir / "watchlist_logreg_top400.pkl"
+    watchlist_model_path = settings.paths.model_dir / f"watchlist_logreg_top{settings.runtime.shortlist_count}.pkl"
     LOGGER.info("Running watchlist OOS comparison")
     watchlist_outputs = evaluate_watchlist_model_cv(
         watchlist_training_panel,

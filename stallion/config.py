@@ -23,8 +23,8 @@ class CostConfig:
 class RuntimeConfig:
     market_timezone: str = "America/New_York"
     top_n_universe: int = 3000
-    shortlist_count: int = 400
-    monitor_count: int = 500
+    shortlist_count: int = 200
+    monitor_count: int = 200
     daily_history_days: int = 400
     intraday_history_sessions: int = 40
     same_slot_lookback_sessions: int = 20
