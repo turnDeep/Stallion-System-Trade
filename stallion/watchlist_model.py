@@ -338,7 +338,7 @@ def train_watchlist_model(train_frame: pd.DataFrame, spec: WatchlistModelSpec) -
     model = LogisticRegression(**model_kwargs)
     model.fit(x_train, y_train)
     bundle = WatchlistModelBundle(
-        model_name="watchlist_logreg_top400",
+        model_name=f"watchlist_logreg_top{spec.shortlist_count}",
         created_at=pd.Timestamp.utcnow(),
         feature_columns=spec.feature_columns,
         label_mode=spec.label_mode,
@@ -706,17 +706,17 @@ def evaluate_watchlist_model_cv(
     legacy_shortlists = pd.concat(legacy_shortlist_rows, ignore_index=True) if legacy_shortlist_rows else pd.DataFrame()
     downstream_frame = pd.DataFrame(downstream_rows)
     validation_scored = pd.concat(all_validation_scored, ignore_index=True) if all_validation_scored else pd.DataFrame()
-    top400_count_frame = (
-        new_shortlists.groupby("feature_date", observed=True).size().rename("top400_count").reset_index()
+    shortlist_count_frame = (
+        new_shortlists.groupby("feature_date", observed=True).size().rename("shortlist_count").reset_index()
         if not new_shortlists.empty
-        else pd.DataFrame(columns=["feature_date", "top400_count"])
+        else pd.DataFrame(columns=["feature_date", "shortlist_count"])
     )
     summary = {
         "cv_fold_count": int(len(fold_metrics_frame)),
         "mean_roc_auc": float(fold_metrics_frame["roc_auc"].mean()) if not fold_metrics_frame.empty else float("nan"),
         "mean_average_precision": float(fold_metrics_frame["average_precision"].mean()) if not fold_metrics_frame.empty else float("nan"),
-        "mean_top400_precision": float(fold_metrics_frame["topk_precision"].mean()) if not fold_metrics_frame.empty else float("nan"),
-        "mean_top400_recall": float(fold_metrics_frame["topk_recall"].mean()) if not fold_metrics_frame.empty else float("nan"),
+        "mean_shortlist_precision": float(fold_metrics_frame["topk_precision"].mean()) if not fold_metrics_frame.empty else float("nan"),
+        "mean_shortlist_recall": float(fold_metrics_frame["topk_recall"].mean()) if not fold_metrics_frame.empty else float("nan"),
         "mean_overlap_rate": float(downstream_frame["overlap_rate"].mean()) if not downstream_frame.empty else float("nan"),
         "mean_total_return_delta": float(downstream_frame["total_return_delta"].mean()) if not downstream_frame.empty else float("nan"),
     }
@@ -728,7 +728,7 @@ def evaluate_watchlist_model_cv(
         "legacy_shortlists": legacy_shortlists,
         "downstream_comparison": downstream_frame,
         "validation_scored": validation_scored,
-        "top400_counts": top400_count_frame,
+        "shortlist_counts": shortlist_count_frame,
         "feature_distribution": _feature_distribution_table(training_panel),
         "summary": summary,
     }
@@ -743,7 +743,7 @@ def write_watchlist_reports(report_dir: Path, cv_outputs: dict[str, pd.DataFrame
         "watchlist_legacy_vs_model_compare.csv": cv_outputs["downstream_comparison"],
         "watchlist_learned_coefficients.csv": cv_outputs["coefficients"],
         "watchlist_learned_coefficients_summary.csv": cv_outputs["coefficient_summary"],
-        "watchlist_top400_counts.csv": cv_outputs["top400_counts"],
+        "watchlist_shortlist_counts.csv": cv_outputs["shortlist_counts"],
         "watchlist_feature_distribution.csv": cv_outputs["feature_distribution"],
     }
     for filename, frame in csv_map.items():
@@ -756,11 +756,12 @@ def write_watchlist_reports(report_dir: Path, cv_outputs: dict[str, pd.DataFrame
         "# Watchlist Model OOS Summary",
         "",
         f"- label_mode: `{spec.label_mode}`",
+        f"- shortlist_count: {spec.shortlist_count}",
         f"- cv_fold_count: {summary['cv_fold_count']}",
         f"- mean_roc_auc: {summary['mean_roc_auc']:.4f}" if pd.notna(summary["mean_roc_auc"]) else "- mean_roc_auc: n/a",
         f"- mean_average_precision: {summary['mean_average_precision']:.4f}" if pd.notna(summary["mean_average_precision"]) else "- mean_average_precision: n/a",
-        f"- mean_top400_precision: {summary['mean_top400_precision']:.4f}" if pd.notna(summary["mean_top400_precision"]) else "- mean_top400_precision: n/a",
-        f"- mean_top400_recall: {summary['mean_top400_recall']:.4f}" if pd.notna(summary["mean_top400_recall"]) else "- mean_top400_recall: n/a",
+        f"- mean_shortlist_precision: {summary['mean_shortlist_precision']:.4f}" if pd.notna(summary["mean_shortlist_precision"]) else "- mean_shortlist_precision: n/a",
+        f"- mean_shortlist_recall: {summary['mean_shortlist_recall']:.4f}" if pd.notna(summary["mean_shortlist_recall"]) else "- mean_shortlist_recall: n/a",
         f"- mean_overlap_rate_vs_legacy: {summary['mean_overlap_rate']:.4f}" if pd.notna(summary["mean_overlap_rate"]) else "- mean_overlap_rate_vs_legacy: n/a",
         f"- mean_total_return_delta_vs_legacy: {summary['mean_total_return_delta']:.4f}" if pd.notna(summary["mean_total_return_delta"]) else "- mean_total_return_delta_vs_legacy: n/a",
         "",

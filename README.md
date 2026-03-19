@@ -5,7 +5,7 @@ Language / 言語: **English** | [日本語](./README.ja.md)
 Stallion-System-Trade is now a **two-stage live-trading scaffold for the standard intraday Russell-3000 model**:
 
 - night-before refresh of the **top 3000 U.S. stocks by market cap**
-- stage-1 nightly **watchlist model** on 7 daily features to select the next-session top 400 shortlist
+- stage-1 nightly **watchlist model** on 7 daily features to select the next-session top 200 shortlist
 - the stage-1 watchlist model is built from **same-day EOD daily features at the latest completed close**
 - daily context computed on **252+ trading days of split-adjusted daily bars**
 - intraday monitoring on **5-minute bars**
