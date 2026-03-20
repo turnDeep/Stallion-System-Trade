@@ -5,6 +5,8 @@ import sqlite3
 import subprocess
 import sys
 import time
+import traceback
+from dataclasses import dataclass
 from pathlib import Path
 
 import pandas as pd
@@ -21,10 +23,145 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODEL_FILENAME = "hist_gbm_extended_5m_start.pkl"
 STORE = None
 NOTIFIER = None
+DISCORD_DETAIL_CHUNK_CHARS = 1200
+STDIO_CAPTURE_CHAR_LIMIT = 6000
+SECRET_ENV_KEYS = (
+    "WEBULL_APP_KEY",
+    "WEBULL_APP_SECRET",
+    "WEBULL_ACCOUNT_ID",
+    "FMP_API_KEY",
+    "DISCORD_BOT_TOKEN",
+    "DISCORD_CHANNEL_ID",
+)
+
+
+@dataclass(frozen=True)
+class ScriptExecutionError(RuntimeError):
+    script_name: str
+    return_code: int
+    stdout_tail: str
+    stderr_tail: str
+
+    def __str__(self) -> str:
+        stream = "stderr" if self.stderr_tail else "stdout"
+        detail = self.stderr_tail or self.stdout_tail or "no subprocess output captured"
+        first_line = detail.splitlines()[0][:300] if detail else "no subprocess output captured"
+        return f"{self.script_name} failed with exit status {self.return_code} ({stream}: {first_line})"
+
+
+def _tail_text(text: str | None, max_chars: int = STDIO_CAPTURE_CHAR_LIMIT) -> str:
+    normalized = str(text or "").replace("\r\n", "\n").strip()
+    if len(normalized) <= max_chars:
+        return normalized
+    return normalized[-max_chars:]
+
+
+def _redact_sensitive_text(text: str | None) -> str:
+    redacted = str(text or "")
+    for key in SECRET_ENV_KEYS:
+        value = str(os.getenv(key) or "").strip()
+        if value:
+            redacted = redacted.replace(value, f"[REDACTED:{key}]")
+    return redacted
+
+
+def _chunk_text(text: str | None, max_chars: int = DISCORD_DETAIL_CHUNK_CHARS) -> list[str]:
+    normalized = str(text or "").replace("\r\n", "\n").strip()
+    if not normalized:
+        return []
+    chunks: list[str] = []
+    remaining = normalized
+    while remaining:
+        if len(remaining) <= max_chars:
+            chunks.append(remaining)
+            break
+        candidate = remaining[:max_chars]
+        split_at = candidate.rfind("\n")
+        if split_at < max_chars // 2:
+            split_at = candidate.rfind(" ")
+        if split_at < max_chars // 2:
+            split_at = max_chars
+        chunks.append(remaining[:split_at].rstrip())
+        remaining = remaining[split_at:].lstrip("\n ")
+    return chunks
+
+
+def _append_alert(level: str, component: str, message: str, payload: dict | None = None) -> None:
+    if STORE is None:
+        return
+    try:
+        STORE.append_alert(level=level, component=component, message=message, payload=payload)
+    except Exception:
+        logger.exception("Failed to append alert to store")
+
+
+def _notify_detailed_failure(title: str, exc: Exception, *, component: str, script_name: str | None = None) -> None:
+    detail_payload: dict[str, object] = {"error_type": type(exc).__name__}
+    summary_lines = [f"- error_type: {type(exc).__name__}"]
+    if script_name:
+        summary_lines.append(f"- script: {script_name}")
+        detail_payload["script_name"] = script_name
+    if isinstance(exc, ScriptExecutionError):
+        summary_lines.append(f"- exit_code: {exc.return_code}")
+        detail_payload["exit_code"] = exc.return_code
+        summary_lines.append(f"- error: {str(exc)}")
+        detail_payload["stdout_tail"] = exc.stdout_tail
+        detail_payload["stderr_tail"] = exc.stderr_tail
+    else:
+        summary_lines.append(f"- error: {str(exc)}")
+        trace_tail = _redact_sensitive_text(_tail_text(traceback.format_exc()))
+        detail_payload["traceback_tail"] = trace_tail
+    logger.error("%s: %s", title, exc)
+    _append_alert("ERROR", component, title, detail_payload)
+    if NOTIFIER is None:
+        return
+    NOTIFIER.notify(title, summary_lines, level="ERROR")
+    streams: list[tuple[str, str]] = []
+    if isinstance(exc, ScriptExecutionError):
+        if exc.stderr_tail:
+            streams.append(("stderr", exc.stderr_tail))
+        if exc.stdout_tail:
+            streams.append(("stdout", exc.stdout_tail))
+    else:
+        trace_tail = detail_payload.get("traceback_tail")
+        if isinstance(trace_tail, str) and trace_tail:
+            streams.append(("traceback", trace_tail))
+    for stream_name, text in streams:
+        chunks = _chunk_text(text)
+        total = len(chunks)
+        for index, chunk in enumerate(chunks, start=1):
+            NOTIFIER.notify(
+                f"{title} DETAIL",
+                [
+                    f"- source: {stream_name}",
+                    f"- chunk: {index}/{total}",
+                    "```text",
+                    *chunk.splitlines(),
+                    "```",
+                ],
+                level="ERROR",
+            )
 
 
 def run_python_script(script_name):
-    subprocess.run([sys.executable, script_name], check=True, cwd=SCRIPT_DIR)
+    logger.info(f"Running script: {script_name}")
+    try:
+        subprocess.run(
+            [sys.executable, script_name], 
+            check=True, 
+            cwd=SCRIPT_DIR,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except subprocess.CalledProcessError as e:
+        raise ScriptExecutionError(
+            script_name=script_name,
+            return_code=int(e.returncode),
+            stdout_tail=_redact_sensitive_text(_tail_text(e.stdout)),
+            stderr_tail=_redact_sensitive_text(_tail_text(e.stderr)),
+        ) from e
 
 def run_daily_ml_pipeline():
     if STORE is not None:
@@ -38,9 +175,7 @@ def run_daily_ml_pipeline():
         if NOTIFIER is not None:
             NOTIFIER.notify("NIGHTLY PIPELINE COMPLETE", ["- status: success"])
     except Exception as e:
-        logger.error(f"Error running daily ML pipeline: {e}")
-        if NOTIFIER is not None:
-            NOTIFIER.notify("NIGHTLY PIPELINE FAILED", [f"- error: {e}"], level="ERROR")
+        _notify_detailed_failure("NIGHTLY PIPELINE FAILED", e, component="master_scheduler", script_name="ml_pipeline_60d.py")
 
 def run_daily_trading_bot():
     if STORE is not None:
@@ -57,9 +192,7 @@ def run_daily_trading_bot():
     try:
         run_python_script('webull_live_trader.py')
     except Exception as e:
-        logger.error(f"Daily trading bot error: {e}")
-        if NOTIFIER is not None:
-            NOTIFIER.notify("LIVE TRADER FAILED", [f"- error: {e}"], level="ERROR")
+        _notify_detailed_failure("LIVE TRADER FAILED", e, component="master_scheduler", script_name="webull_live_trader.py")
 
 
 def _sqlite_table_has_rows(sqlite_path: Path, table_name: str) -> bool:

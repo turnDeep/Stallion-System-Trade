@@ -4,6 +4,7 @@ import json
 import logging
 import queue
 import threading
+import time
 from dataclasses import dataclass
 from typing import Any
 
@@ -87,18 +88,25 @@ class DiscordNotifier:
             delivered = False
             try:
                 if self.bot_token and self.channel_id:
-                    response = self.session.post(
-                        f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages",
-                        headers={
-                            "Authorization": f"Bot {self.bot_token}",
-                            "Content-Type": "application/json",
-                        },
-                        data=json.dumps({"content": item["content"]}),
-                        timeout=15,
-                    )
-                    delivered = response.status_code in {200, 201}
-                    if not delivered:
-                        error_text = f"http_{response.status_code}:{response.text[:200]}"
+                    for _ in range(3):
+                        try:
+                            response = self.session.post(
+                                f"{DISCORD_API_BASE}/channels/{self.channel_id}/messages",
+                                headers={
+                                    "Authorization": f"Bot {self.bot_token}",
+                                    "Content-Type": "application/json",
+                                },
+                                data=json.dumps({"content": item["content"]}),
+                                timeout=30,
+                            )
+                            delivered = response.status_code in {200, 201}
+                            if not delivered:
+                                error_text = f"http_{response.status_code}:{response.text[:200]}"
+                            break
+                        except requests.exceptions.ReadTimeout:
+                            if _ == 2:
+                                raise
+                            time.sleep(1.0)
                 else:
                     error_text = "discord_disabled_or_missing_channel"
             except Exception as exc:
