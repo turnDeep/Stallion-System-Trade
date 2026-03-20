@@ -78,6 +78,16 @@ def _extract_avg_fill_price(row: dict[str, Any]) -> float | None:
         return None
 
 
+def _resolve_close_quantity(row: dict[str, Any]) -> int:
+    available_quantity = row.get("available_quantity")
+    quantity = row.get("quantity")
+    available_int = int(available_quantity or 0)
+    quantity_int = int(quantity or 0)
+    if available_quantity is not None and available_int > 0:
+        return available_int
+    return max(quantity_int, 0)
+
+
 def _build_quote_snapshot_frame(quotes: pd.DataFrame, observed_at_utc: pd.Timestamp) -> pd.DataFrame:
     if quotes.empty:
         return pd.DataFrame(columns=["symbol", "ts", "price", "cumulative_volume", "payload_json"])
@@ -387,7 +397,7 @@ def _reconcile_orders_and_positions(
     reconciled_rows: list[dict[str, Any]] = []
 
     if not broker.is_demo:
-        order_history = broker.get_order_history_df(lookback_days=2, page_size=200)
+        order_history = broker.get_order_history_df(lookback_days=2, page_size=100)
         for row in order_history.to_dict(orient="records"):
             client_order_id = str(row.get("client_order_id") or "")
             existing = existing_by_id.get(client_order_id, {})
@@ -584,7 +594,7 @@ def _close_positions(
     }
     for row in positions.to_dict(orient="records"):
         symbol = str(row.get("symbol") or "").upper()
-        quantity = int(row.get("quantity") or 0)
+        quantity = _resolve_close_quantity(row)
         if quantity <= 0 or symbol in active_sell_symbols:
             continue
         slot_id = _payload_dict(row.get("payload_json")).get("slot_id")

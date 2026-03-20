@@ -43,6 +43,17 @@ def _as_int(value: Any) -> int | None:
         return None
 
 
+def _load_payload_json(payload_json: Any) -> Any:
+    if payload_json in {None, ""}:
+        return None
+    if isinstance(payload_json, (dict, list)):
+        return payload_json
+    try:
+        return json.loads(payload_json)
+    except Exception:
+        return payload_json
+
+
 def _find_nested(payload: Any, candidate_keys: tuple[str, ...]) -> Any:
     if isinstance(payload, dict):
         lowered = {str(key).lower(): value for key, value in payload.items()}
@@ -59,6 +70,33 @@ def _find_nested(payload: Any, candidate_keys: tuple[str, ...]) -> Any:
             if found is not None:
                 return found
     return None
+
+
+def _normalize_page_size(page_size: int | None) -> int:
+    try:
+        normalized = int(page_size or 100)
+    except Exception:
+        normalized = 100
+    return max(10, min(100, normalized))
+
+
+def _first_non_null(series: pd.Series) -> Any:
+    for value in series:
+        if pd.notna(value):
+            return value
+    return None
+
+
+def _weighted_average(values: pd.Series, weights: pd.Series) -> float | None:
+    valid = values.notna() & weights.notna()
+    if not valid.any():
+        return None
+    value_slice = values[valid].astype("float64")
+    weight_slice = weights[valid].astype("float64").abs()
+    total_weight = float(weight_slice.sum())
+    if total_weight <= 0:
+        return _as_float(_first_non_null(value_slice))
+    return float((value_slice * weight_slice).sum() / total_weight)
 
 
 @dataclass(frozen=True)
@@ -145,7 +183,7 @@ class WebullBroker:
     def get_account_buying_power(self) -> float:
         payload = self.get_account_balance_raw()
         direct = _as_float(payload.get("buying_power"))
-        if direct is not None and direct > 0:
+        if direct is not None:
             return direct
 
         nested_direct = _as_float(
@@ -160,7 +198,7 @@ class WebullBroker:
                 ),
             )
         )
-        if nested_direct is not None and nested_direct > 0:
+        if nested_direct is not None:
             return nested_direct
 
         asset_rows = payload.get("account_currency_assets") or []
@@ -169,14 +207,14 @@ class WebullBroker:
                 if not isinstance(row, dict):
                     continue
                 buying_power = _as_float(row.get("buying_power"))
-                if buying_power is not None and buying_power > 0:
+                if buying_power is not None:
                     return buying_power
                 cash_balance = _as_float(row.get("cash_balance"))
-                if cash_balance is not None and cash_balance > 0:
+                if cash_balance is not None:
                     return cash_balance
 
         cash = _as_float(payload.get("total_cash_balance"))
-        if cash is not None and cash > 0:
+        if cash is not None:
             return cash
 
         raise RuntimeError("Could not derive buying power from Webull balance payload.")
@@ -241,14 +279,43 @@ class WebullBroker:
                     "payload_json",
                 ]
             )
-        return frame.groupby("symbol", as_index=False).last()
+        aggregated_rows: list[dict[str, Any]] = []
+        for symbol, symbol_frame in frame.groupby("symbol", sort=False):
+            quantity = int(symbol_frame["quantity"].fillna(0).sum())
+            available_values = symbol_frame["available_quantity"].dropna()
+            available_quantity = int(available_values.sum()) if not available_values.empty else None
+            avg_price = _weighted_average(symbol_frame["avg_price"], symbol_frame["quantity"])
+            if avg_price is None:
+                avg_price = _as_float(_first_non_null(symbol_frame["avg_price"]))
+
+            market_value_values = symbol_frame["market_value"].dropna()
+            market_value = float(market_value_values.sum()) if not market_value_values.empty else None
+
+            payloads = [
+                loaded
+                for loaded in (_load_payload_json(value) for value in symbol_frame["payload_json"].tolist())
+                if loaded is not None
+            ]
+            payload_json = json.dumps(payloads if len(payloads) != 1 else payloads[0], ensure_ascii=True, default=str)
+            aggregated_rows.append(
+                {
+                    "symbol": symbol,
+                    "quantity": quantity,
+                    "available_quantity": available_quantity,
+                    "avg_price": avg_price,
+                    "market_value": market_value,
+                    "payload_json": payload_json,
+                }
+            )
+        return pd.DataFrame(aggregated_rows)
 
     def get_order_history_df(self, *, lookback_days: int = 7, page_size: int = 100) -> pd.DataFrame:
         start = str(date.today() - timedelta(days=lookback_days))
         end = str(date.today())
+        normalized_page_size = _normalize_page_size(page_size)
         response = self.api.order_v2.get_order_history_request(
             self.account_id,
-            page_size=page_size,
+            page_size=normalized_page_size,
             start_date=start,
             end_date=end,
         )
