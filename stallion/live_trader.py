@@ -132,6 +132,28 @@ def _load_daily_feature_slice(store: SQLiteParquetStore, session_date: pd.Timest
     return daily_features
 
 
+def _filter_latest_candidate_rows(
+    candidate_panel: pd.DataFrame,
+    latest_timestamp_utc: pd.Timestamp | None,
+    market_timezone: str,
+) -> pd.DataFrame:
+    latest_per_symbol = candidate_panel.sort_values(["symbol", "timestamp"]).groupby("symbol", sort=False).tail(1).copy()
+    if latest_per_symbol.empty or latest_timestamp_utc is None or pd.isna(latest_timestamp_utc):
+        return latest_per_symbol
+
+    latest_timestamp_utc = pd.Timestamp(latest_timestamp_utc)
+    if latest_timestamp_utc.tzinfo is None:
+        latest_timestamp_utc = latest_timestamp_utc.tz_localize("UTC")
+    target_timestamp = latest_timestamp_utc.tz_convert(market_timezone)
+
+    candidate_timestamps = pd.to_datetime(latest_per_symbol["timestamp"], errors="coerce")
+    if getattr(candidate_timestamps.dt, "tz", None) is None:
+        comparable_target = target_timestamp.tz_localize(None)
+    else:
+        comparable_target = target_timestamp
+    return latest_per_symbol[candidate_timestamps.eq(comparable_target)].copy()
+
+
 def _summarize_signal_reason(row: pd.Series) -> str:
     candidates = {
         "daily_buy_pressure_prev": row.get("daily_buy_pressure_prev"),
@@ -771,10 +793,11 @@ def run_live_trader(settings: Settings | None = None) -> None:
             continue
 
         latest_timestamp = pd.to_datetime(finalized["ts"], utc=True, errors="coerce").max()
-        latest_timestamp_ny = latest_timestamp.tz_convert(settings.runtime.market_timezone).tz_localize(None) if pd.notna(latest_timestamp) else None
-        latest_per_symbol = candidate_panel.sort_values(["symbol", "timestamp"]).groupby("symbol", sort=False).tail(1).copy()
-        if latest_timestamp_ny is not None:
-            latest_per_symbol = latest_per_symbol[latest_per_symbol["timestamp"].eq(latest_timestamp_ny)].copy()
+        latest_per_symbol = _filter_latest_candidate_rows(
+            candidate_panel,
+            latest_timestamp_utc=latest_timestamp,
+            market_timezone=settings.runtime.market_timezone,
+        )
         if latest_per_symbol.empty:
             time.sleep(settings.runtime.quote_poll_seconds)
             continue
