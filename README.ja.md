@@ -4,7 +4,7 @@
 
 Stallion-System-Trade は、米国個別株向けの 2 段階 intraday 売買システムです。
 
-- 第1段階: 前日引け後に 7 つの日足特徴量で翌営業日の上位 200 銘柄を選ぶ watchlist モデル
+- 第1段階: 前日引け後に 7 つの日足特徴量で翌営業日の上位 100 銘柄を選ぶ watchlist モデル
 - 第2段階: shortlist に対して 16 特徴量の intraday モデルで 5 分足ごとにスコアリングし、最大 4 銘柄まで発注
 - 保存形式: SQLite + Parquet
 - Webull 本番認証が不足している場合は自動で DEMO モード
@@ -28,6 +28,17 @@ Discord 通知には `[LIVE]` または `[DEMO]` が付きます。
 
 ### 第1段階: Nightly watchlist model
 
+ユニバースと前処理:
+
+- 時価総額上位 3000 銘柄を raw universe として保持
+- 日足と 5 分足の履歴は full universe のまま保存
+- `daily_features` も full universe のまま計算
+- その後、stage-1 学習、最新 watchlist scoring、stage-2 学習の直前に流動性フィルタを適用
+- 流動性フィルタ:
+  - `min_price >= 5.0`
+  - `min_daily_volume >= 1,000,000`
+  - `min_dollar_volume >= 10,000,000`
+
 引け時点 `t` で以下 7 特徴量を使い、翌営業日 `t+1` の shortlist を作ります。
 
 1. `daily_buy_pressure_prev`
@@ -39,7 +50,8 @@ Discord 通知には `[LIVE]` または `[DEMO]` が付きます。
 7. `industry_rs_prev`
 
 - モデル: `LogisticRegression`
-- 出力: 翌営業日用 top 200 shortlist
+- `daily_rs_score`: `0.40 * ROC21 + 0.20 * ROC63 + 0.20 * ROC126 + 0.20 * ROC252`
+- 出力: 翌営業日用 top 100 shortlist
 
 ### 第2段階: Intraday execution
 
