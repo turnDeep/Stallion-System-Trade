@@ -72,6 +72,46 @@ def _find_nested(payload: Any, candidate_keys: tuple[str, ...]) -> Any:
     return None
 
 
+def _derive_buying_power_from_asset_rows(asset_rows: Any) -> float | None:
+    if not isinstance(asset_rows, list):
+        return None
+
+    normalized_rows: list[dict[str, Any]] = []
+    for row in asset_rows:
+        if not isinstance(row, dict):
+            continue
+        normalized_rows.append(
+            {
+                "currency": str(row.get("currency") or "").upper(),
+                "buying_power": _as_float(row.get("buying_power")),
+                "cash_balance": _as_float(row.get("cash_balance")),
+            }
+        )
+
+    for field_name in ("buying_power", "cash_balance"):
+        usd_positive = [
+            row[field_name]
+            for row in normalized_rows
+            if row["currency"] == "USD" and row[field_name] is not None and row[field_name] > 0
+        ]
+        if usd_positive:
+            return max(usd_positive)
+
+        any_positive = [row[field_name] for row in normalized_rows if row[field_name] is not None and row[field_name] > 0]
+        if any_positive:
+            return max(any_positive)
+
+        usd_any = [row[field_name] for row in normalized_rows if row["currency"] == "USD" and row[field_name] is not None]
+        if usd_any:
+            return usd_any[0]
+
+        any_values = [row[field_name] for row in normalized_rows if row[field_name] is not None]
+        if any_values:
+            return any_values[0]
+
+    return None
+
+
 def _normalize_page_size(page_size: int | None) -> int:
     try:
         normalized = int(page_size or 100)
@@ -182,13 +222,25 @@ class WebullBroker:
 
     def get_account_buying_power(self) -> float:
         payload = self.get_account_balance_raw()
-        direct = _as_float(payload.get("buying_power"))
-        if direct is not None:
-            return direct
+        for key in (
+            "buying_power",
+            "cash_buying_power",
+            "daytrade_buying_power",
+            "overnight_buying_power",
+            "available_buying_power",
+        ):
+            direct = _as_float(payload.get(key))
+            if direct is not None:
+                return direct
+
+        asset_rows = payload.get("account_currency_assets") or []
+        asset_row_value = _derive_buying_power_from_asset_rows(asset_rows)
+        if asset_row_value is not None:
+            return asset_row_value
 
         nested_direct = _as_float(
             _find_nested(
-                payload,
+                {key: value for key, value in payload.items() if key != "account_currency_assets"},
                 (
                     "buying_power",
                     "cash_buying_power",
@@ -200,18 +252,6 @@ class WebullBroker:
         )
         if nested_direct is not None:
             return nested_direct
-
-        asset_rows = payload.get("account_currency_assets") or []
-        if isinstance(asset_rows, list):
-            for row in asset_rows:
-                if not isinstance(row, dict):
-                    continue
-                buying_power = _as_float(row.get("buying_power"))
-                if buying_power is not None:
-                    return buying_power
-                cash_balance = _as_float(row.get("cash_balance"))
-                if cash_balance is not None:
-                    return cash_balance
 
         cash = _as_float(payload.get("total_cash_balance"))
         if cash is not None:
