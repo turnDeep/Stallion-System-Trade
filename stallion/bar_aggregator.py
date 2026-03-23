@@ -9,10 +9,8 @@ import pandas as pd
 def _to_utc_timestamp(value: Any) -> pd.Timestamp:
     ts = pd.Timestamp(value)
     if ts.tzinfo is None:
-        ts = ts.tz_localize("UTC")
-    else:
-        ts = ts.tz_convert("UTC")
-    return ts
+        raise ValueError("Naive timestamps are not allowed; pass an explicit UTC timestamp.")
+    return ts.tz_convert("UTC")
 
 
 def _bar_start_utc(observed_at_utc: pd.Timestamp, session_timezone: str) -> pd.Timestamp:

@@ -14,6 +14,7 @@ from .strategy import STANDARD_FEATURE_COLUMNS, session_bucket_from_minutes
 
 
 LOGGER = logging.getLogger(__name__)
+MARKET_TIMEZONE = "America/New_York"
 
 
 def _safe_div(numerator: pd.Series, denominator: pd.Series) -> pd.Series:
@@ -56,6 +57,13 @@ def _normalize_session_dates(values) -> pd.Series:
     return series.dt.normalize()
 
 
+def _ensure_market_timezone(values, market_timezone: str = MARKET_TIMEZONE) -> pd.Series:
+    series = pd.to_datetime(pd.Series(values), errors="coerce")
+    if getattr(series.dt, "tz", None) is None:
+        return series.dt.tz_localize(market_timezone, ambiguous="NaT", nonexistent="shift_forward")
+    return series.dt.tz_convert(market_timezone)
+
+
 def build_daily_tradeability_flags(
     daily_bars: pd.DataFrame,
     *,
@@ -67,7 +75,7 @@ def build_daily_tradeability_flags(
         return pd.DataFrame(columns=["session_date", "symbol", "close", "volume", "dollar_volume", "is_eligible"])
 
     work = daily_bars.copy()
-    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert("America/New_York")
+    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert(MARKET_TIMEZONE)
     work["session_date"] = _normalize_session_dates(localized)
     work = work.dropna(subset=["session_date", "symbol"]).copy()
     work["close"] = pd.to_numeric(work["close"], errors="coerce")
@@ -86,7 +94,7 @@ def build_daily_feature_history(daily_bars: pd.DataFrame, universe: pd.DataFrame
         return pd.DataFrame(columns=["session_date", "symbol", *STANDARD_FEATURE_COLUMNS, "prev_day_high", "prev_day_atr14"])
 
     work = daily_bars.copy()
-    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert("America/New_York")
+    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert(MARKET_TIMEZONE)
     work["session_date"] = _normalize_session_dates(localized)
     work = work.dropna(subset=["session_date"]).sort_values(["symbol", "session_date"]).reset_index(drop=True)
     work["adj_close"] = work["adj_close"].fillna(work["close"])
@@ -237,7 +245,7 @@ def build_intraday_feature_panel(
     work = intraday_bars.copy()
     keep_columns = ["symbol", "ts", "open", "high", "low", "close", "volume"]
     work = work[[column for column in keep_columns if column in work.columns]].copy()
-    work["timestamp"] = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert("America/New_York")
+    work["timestamp"] = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert(MARKET_TIMEZONE)
     work = work.dropna(subset=["timestamp"]).sort_values(["symbol", "timestamp"]).reset_index(drop=True)
     work["session_date"] = _normalize_session_dates(work["timestamp"])
     open_minutes = work["timestamp"].dt.hour * 60 + work["timestamp"].dt.minute
@@ -341,7 +349,8 @@ def build_intraday_feature_panel(
         panel["distance_to_prev_day_high"] = (panel["close"] / panel["prev_day_high"]) - 1.0
         panel["rs_x_intraday_rvol"] = panel["daily_rs_score_prev"] * panel["intraday_rvol"]
         panel["intraday_range_expansion_vs_atr"] = (panel["session_high_so_far"] - panel["session_low_so_far"]) / panel["prev_day_atr14"].replace(0, np.nan)
-        panel["timestamp"] = pd.to_datetime(panel["timestamp"], utc=False)
+        panel["timestamp"] = _ensure_market_timezone(panel["timestamp"], market_timezone=MARKET_TIMEZONE)
+        panel["next_timestamp"] = _ensure_market_timezone(panel["next_timestamp"], market_timezone=MARKET_TIMEZONE)
         panel = panel[
             [
                 "timestamp",
