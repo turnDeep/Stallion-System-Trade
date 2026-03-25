@@ -12,7 +12,7 @@ from sklearn.linear_model import LogisticRegression
 from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
-from .features import build_stage2_labeled_panel
+from .features import _daily_bar_session_dates, build_stage2_labeled_panel
 from .modeling import fit_hist_gbm, score_candidates
 from .strategy import StandardSystemSpec, select_candidates_for_session
 
@@ -191,12 +191,7 @@ def make_watchlist_labels(daily_features: pd.DataFrame, daily_bars: pd.DataFrame
     signal_labels = session_map.merge(signal_labels, on="next_session_date", how="left")
 
     daily_work = daily_bars.copy()
-    daily_work["session_date"] = (
-        pd.to_datetime(daily_work["ts"], utc=True, errors="coerce")
-        .dt.tz_convert("America/New_York")
-        .dt.normalize()
-        .dt.tz_localize(None)
-    )
+    daily_work["session_date"] = _daily_bar_session_dates(daily_work["ts"])
     daily_work = daily_work.dropna(subset=["session_date"]).sort_values(["symbol", "session_date"]).copy()
     daily_work["adj_close"] = daily_work["adj_close"].fillna(daily_work["close"])
     daily_work["next_adj_close"] = daily_work.groupby("symbol", sort=False)["adj_close"].shift(-1)

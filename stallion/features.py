@@ -57,6 +57,13 @@ def _normalize_session_dates(values) -> pd.Series:
     return series.dt.normalize()
 
 
+def _daily_bar_session_dates(values) -> pd.Series:
+    series = pd.to_datetime(pd.Series(values), errors="coerce")
+    if getattr(series.dt, "tz", None) is not None:
+        series = series.dt.tz_convert("UTC").dt.tz_localize(None)
+    return series.dt.normalize()
+
+
 def _ensure_market_timezone(values, market_timezone: str = MARKET_TIMEZONE) -> pd.Series:
     series = pd.to_datetime(pd.Series(values), errors="coerce")
     if getattr(series.dt, "tz", None) is None:
@@ -75,8 +82,7 @@ def build_daily_tradeability_flags(
         return pd.DataFrame(columns=["session_date", "symbol", "close", "volume", "dollar_volume", "is_eligible"])
 
     work = daily_bars.copy()
-    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert(MARKET_TIMEZONE)
-    work["session_date"] = _normalize_session_dates(localized)
+    work["session_date"] = _daily_bar_session_dates(work["ts"])
     work = work.dropna(subset=["session_date", "symbol"]).copy()
     work["close"] = pd.to_numeric(work["close"], errors="coerce")
     work["volume"] = pd.to_numeric(work["volume"], errors="coerce")
@@ -94,8 +100,7 @@ def build_daily_feature_history(daily_bars: pd.DataFrame, universe: pd.DataFrame
         return pd.DataFrame(columns=["session_date", "symbol", *STANDARD_FEATURE_COLUMNS, "prev_day_high", "prev_day_atr14"])
 
     work = daily_bars.copy()
-    localized = pd.to_datetime(work["ts"], utc=True, errors="coerce").dt.tz_convert(MARKET_TIMEZONE)
-    work["session_date"] = _normalize_session_dates(localized)
+    work["session_date"] = _daily_bar_session_dates(work["ts"])
     work = work.dropna(subset=["session_date"]).sort_values(["symbol", "session_date"]).reset_index(drop=True)
     work["adj_close"] = work["adj_close"].fillna(work["close"])
     metadata = universe[["symbol", "sector", "industry"]].drop_duplicates(subset=["symbol"]).copy()
