@@ -56,6 +56,39 @@ def _payload_dict(raw_payload: object) -> dict[str, Any]:
         return {}
 
 
+TAX_RATE = 0.20315  # 所得税15.315% + 住民税5%
+
+
+def _notify_tax_if_profitable(
+    notifier: DiscordNotifier,
+    *,
+    symbol: str,
+    entry_price: float,
+    exit_price: float,
+    shares: int,
+    reason: str,
+) -> None:
+    """利益が出た場合のみ、税金換金アラートをDiscordへ送信する。"""
+    profit_usd = (exit_price - entry_price) * shares
+    if profit_usd <= 0:
+        return  # 損失・プラマイゼロ → 通知不要
+    tax_usd = profit_usd * TAX_RATE
+    notifier.notify(
+        "⚠️ 税金換金アラート",
+        [
+            f"- symbol:     {symbol}",
+            f"- reason:     {reason}",
+            f"- shares:     {shares} 株",
+            f"- entry:      ${entry_price:.2f}",
+            f"- exit:       ${exit_price:.2f}",
+            f"- 利益:        ${profit_usd:.2f} USD",
+            f"- 税金概算:    ${tax_usd:.2f} USD (20.315%)",
+            "- 👉 Webull アプリで上記金額を USD → JPY に換金してください",
+        ],
+        level="WARNING",
+    )
+
+
 def _build_quote_snapshot_frame(quotes: pd.DataFrame, observed_at_utc: pd.Timestamp) -> pd.DataFrame:
     if quotes.empty:
         return pd.DataFrame(columns=["symbol", "ts", "price", "cumulative_volume", "payload_json"])
@@ -255,6 +288,14 @@ def _evaluate_intraday_hard_stops(
             )
             if submitted is not None:
                 notifier.notify("SELL ORDER SUBMITTED", [f"- symbol: {state.symbol}", f"- qty: {state.shares}", "- reason: intraday_hard_stop"])
+                _notify_tax_if_profitable(
+                    notifier,
+                    symbol=state.symbol,
+                    entry_price=state.entry_price,
+                    exit_price=state.initial_stop,
+                    shares=state.shares,
+                    reason="intraday_hard_stop",
+                )
             continue
         updated_rows.append(row)
     _replace_position_rows(store, updated_rows)
@@ -293,7 +334,8 @@ def _evaluate_end_of_day_exits(
             target_remaining = int(action.get("target_remaining_shares", state.shares))
             shares_to_sell = max(0, state.shares - target_remaining)
             if shares_to_sell > 0:
-                _submit_order(
+                exit_price_reduce = float(action.get("price", latest.close))
+                submitted_reduce = _submit_order(
                     store,
                     broker,
                     notifier,
@@ -301,9 +343,18 @@ def _evaluate_end_of_day_exits(
                     symbol=state.symbol,
                     side="SELL",
                     quantity=shares_to_sell,
-                    price_hint=float(action.get("price", latest.close)),
+                    price_hint=exit_price_reduce,
                     payload={**payload, "exit_reason": action.get("reason")},
                 )
+                if submitted_reduce is not None:
+                    _notify_tax_if_profitable(
+                        notifier,
+                        symbol=state.symbol,
+                        entry_price=state.entry_price,
+                        exit_price=exit_price_reduce,
+                        shares=shares_to_sell,
+                        reason=str(action.get("reason", "reduce")),
+                    )
                 state.shares = target_remaining
             if state.shares > 0:
                 state.pending_dma21_grace = bool(action.get("pending_dma21_grace", False))
@@ -311,7 +362,8 @@ def _evaluate_end_of_day_exits(
             continue
 
         if action.get("action") == "exit_all":
-            _submit_order(
+            exit_price_all = float(action.get("price", latest.close))
+            submitted_all = _submit_order(
                 store,
                 broker,
                 notifier,
@@ -319,9 +371,18 @@ def _evaluate_end_of_day_exits(
                 symbol=state.symbol,
                 side="SELL",
                 quantity=state.shares,
-                price_hint=float(action.get("price", latest.close)),
+                price_hint=exit_price_all,
                 payload={**payload, "exit_reason": action.get("reason")},
             )
+            if submitted_all is not None:
+                _notify_tax_if_profitable(
+                    notifier,
+                    symbol=state.symbol,
+                    entry_price=state.entry_price,
+                    exit_price=exit_price_all,
+                    shares=state.shares,
+                    reason=str(action.get("reason", "exit_all")),
+                )
             continue
 
         payload_json = json.dumps(payload, ensure_ascii=True, default=str)
