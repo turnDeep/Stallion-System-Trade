@@ -102,12 +102,28 @@ def _build_quote_snapshot_frame(quotes: pd.DataFrame, observed_at_utc: pd.Timest
     return work[["symbol", "ts", "price", "cumulative_volume", "payload_json"]].dropna(subset=["price"])
 
 
-def _load_shortlist_symbols(store: SQLiteParquetStore, settings: Settings, session_date: pd.Timestamp) -> list[str]:
+def _load_monitor_symbols(
+    store: SQLiteParquetStore,
+    settings: Settings,
+    session_date: pd.Timestamp,
+    *,
+    extra_symbols: list[str] | None = None,
+) -> list[str]:
+    """shortlist ∪ extra_symbols (open positions) で監視対象を構築する。"""
     shortlist = store.load_shortlist(session_date)
     if shortlist.empty:
         shortlist = store.load_shortlist()
     shortlist = shortlist.head(settings.runtime.monitor_count).copy()
-    symbols = shortlist["symbol"].dropna().astype(str).str.upper().tolist()
+    base = set(shortlist["symbol"].dropna().astype(str).str.upper().tolist())
+
+    # 持ち越し建玉を必ず含める（shortlistに入っていなくても EOD exit が正しく動くよう）
+    if extra_symbols:
+        for sym in extra_symbols:
+            sym_upper = str(sym).strip().upper()
+            if sym_upper:
+                base.add(sym_upper)
+
+    symbols = sorted(base)
     if not symbols:
         raise RuntimeError("No shortlist symbols available. Run the nightly pipeline first.")
     return symbols
@@ -403,7 +419,23 @@ def run_live_trader(settings: Settings | None = None) -> None:
     notifier.notify("BOT STARTUP", [f"- mode: {settings.trade_mode}", "- strategy: qullamaggie_breakout"])
 
     today = _today_ny(settings)
-    symbols = _load_shortlist_symbols(store, settings, today)
+    # 持ち越し建玉を shortlist に優先マージして監視対象を確定する
+    open_positions_at_start = _open_positions_frame(store)
+    carried_symbols = (
+        open_positions_at_start["symbol"].dropna().astype(str).str.upper().tolist()
+        if not open_positions_at_start.empty
+        else []
+    )
+    symbols = _load_monitor_symbols(store, settings, today, extra_symbols=carried_symbols)
+    if carried_symbols:
+        LOGGER.info(
+            "Monitor symbols: %d total (shortlist + %d carried open positions: %s)",
+            len(symbols),
+            len(carried_symbols),
+            carried_symbols,
+        )
+    else:
+        LOGGER.info("Monitor symbols: %d (shortlist only, no carried positions)", len(symbols))
     aggregator = QuoteBarAggregator(session_timezone=settings.runtime.market_timezone)
     opening_buying_power = None
     eod_exit_done = False  # ensure EOD exits run only once per session
