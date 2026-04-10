@@ -176,7 +176,7 @@ def _finalize_report(
         report["broke_out"]
         & (report["leader_score"] >= 94.0)
         & report["setup_score_pre"].between(70.0, 75.0)
-        & report["trigger_score"].between(72.0, 85.0)
+        & (report["trigger_score"] >= 76.0)
     )
     report["breakout_signal"] = (
         report["history_ok"]
