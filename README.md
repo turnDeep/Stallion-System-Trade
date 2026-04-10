@@ -1,8 +1,8 @@
-# Stallion-System-Trade
+# Auto-Swing-Trade-Bot
 
 English | [日本語](./README.ja.md)
 
-Stallion-System-Trade-qm is a Qullamaggie-style breakout swing trading system for U.S. equities.
+Auto-Swing-Trade-Bot is a Qullamaggie-style breakout swing trading system for U.S. equities.
 
 - Universe: top 3000 U.S. stocks by market cap from FMP
 - Signal engine: daily setup + intraday 5-minute breakout confirmation
