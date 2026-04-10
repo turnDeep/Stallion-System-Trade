@@ -1,8 +1,8 @@
-# Stallion-System-Trade
+# Auto-Swing-Trade-Bot
 
 [English](./README.md) | 日本語
 
-Stallion-System-Trade-qm は、米国株向けの Qullamaggie 型 breakout スイングトレードシステムです。
+Auto-Swing-Trade-Bot は、米国株向けの Qullamaggie 型 breakout スイングトレードシステムです。
 
 - ユニバース: FMP から取得する時価総額上位 3000 銘柄
 - シグナル: 日足 setup と 5 分足 breakout 確認
