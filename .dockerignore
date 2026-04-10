@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+*$py.class
+.env
+data/
+reports/
+*.pkl
+*.parquet
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
