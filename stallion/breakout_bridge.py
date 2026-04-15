@@ -30,13 +30,17 @@ class BreakoutConfig:
     fast_fail_days: int = 1
     day0_day1_pivot_fail_exit_all: bool = True
 
-    # Exit Policy
-    tp_partial_r: float = 1.75             # 1.75R で半分利確
-    tp_partial_pct: float = 0.10           # または 10% 上昇で半分利確
+    # Exit policy
+    tp_partial_r: float = 1.75
+    tp_partial_pct: float = 0.10
+
     dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
     dma10_exit_threshold: float = 50.0
-    dma21_exit_after_reduce_threshold: float = 45.0  # 旧 dma21_exit_threshold
+
+    dma21_reduce_to_frac: float = 0.10
+    dma21_reduce_threshold: float = 45.0
+    dma21_exit_after_reduce_threshold: float = 40.0
     use_dma21_tight_low_volume_grace: bool = True
 
     use_intraday_trigger_time: bool = True
@@ -59,13 +63,17 @@ class BreakoutConfig:
             adr_limit_mult=float(getattr(runtime, "adr_limit_mult", 1.0)),
             fast_fail_days=int(getattr(runtime, "fast_fail_days", 1)),
             day0_day1_pivot_fail_exit_all=bool(getattr(runtime, "day0_day1_pivot_fail_exit_all", True)),
+            tp_partial_r=float(getattr(runtime, "tp_partial_r", 1.75)),
+            tp_partial_pct=float(getattr(runtime, "tp_partial_pct", 0.10)),
             dma10_reduce_to_frac=float(getattr(runtime, "dma10_reduce_to_frac", 0.25)),
             dma10_reduce_threshold=float(getattr(runtime, "dma10_reduce_threshold", 55.0)),
             dma10_exit_threshold=float(getattr(runtime, "dma10_exit_threshold", 50.0)),
-            dma21_exit_after_reduce_threshold=float(getattr(runtime, "dma21_exit_threshold", 45.0)),
+            dma21_reduce_to_frac=float(getattr(runtime, "dma21_reduce_to_frac", 0.10)),
+            dma21_reduce_threshold=float(getattr(runtime, "dma21_reduce_threshold", 45.0)),
+            dma21_exit_after_reduce_threshold=float(
+                getattr(runtime, "dma21_exit_after_reduce_threshold", 40.0)
+            ),
             use_dma21_tight_low_volume_grace=bool(getattr(runtime, "use_dma21_tight_low_volume_grace", True)),
-            tp_partial_r=float(getattr(runtime, "tp_partial_r", 1.75)),
-            tp_partial_pct=float(getattr(runtime, "tp_partial_pct", 0.10)),
             use_intraday_trigger_time=bool(getattr(runtime, "use_intraday_trigger_time", True)),
             entry_at=str(getattr(runtime, "entry_at", "trigger_close")),
             allow_reentry_same_symbol=bool(getattr(runtime, "allow_reentry_same_symbol", False)),
@@ -86,6 +94,7 @@ class BreakoutPositionState:
     entry_bar_time: pd.Timestamp | None = None
     pending_dma21_grace: bool = False
     partial_profit_taken: bool = False
+    reduced_on_dma21: bool = False
     entry_source: str = "standard_breakout"
     entry_lane: str = "none"
 
@@ -298,57 +307,115 @@ def evaluate_exit_action(
     cur_date = pd.to_datetime(row["date"]).normalize()
     close_price = float(pd.to_numeric(row.get("close"), errors="coerce"))
     low_price = float(pd.to_numeric(row.get("low"), errors="coerce"))
+    high_price = float(pd.to_numeric(row.get("high"), errors="coerce"))
     hold_score = pd.to_numeric(row.get("hold_score"), errors="coerce")
     dma10 = pd.to_numeric(row.get("dma10"), errors="coerce")
     dma21 = pd.to_numeric(row.get("dma21"), errors="coerce")
     tight_low_volume = bool(row.get("tight_low_volume_day")) if pd.notna(row.get("tight_low_volume_day")) else False
     days_since_entry = int((cur_date - pd.Timestamp(state.entry_date).normalize()).days)
 
-    # 1. ハードストップ（防御）
     if low_price <= state.initial_stop and state.shares > 0:
-        return {"action": "exit_all", "reason": "hard_stop_lod", "price": state.initial_stop, "pending_dma21_grace": False}
+        return {
+            "action": "exit_all",
+            "reason": "hard_stop_lod",
+            "price": state.initial_stop,
+            "pending_dma21_grace": False,
+            "partial_profit_taken": state.partial_profit_taken,
+            "reduced_on_dma21": state.reduced_on_dma21,
+        }
 
-    # 2. 初期ピボット割れ（早期失敗）
     if (
         cfg.day0_day1_pivot_fail_exit_all
         and days_since_entry <= cfg.fast_fail_days
         and close_price < state.pivot_level
         and state.shares > 0
     ):
-        return {"action": "exit_all", "reason": "pivot_fail_exit_all", "price": close_price, "pending_dma21_grace": False}
+        return {
+            "action": "exit_all",
+            "reason": "pivot_fail_exit_all",
+            "price": close_price,
+            "pending_dma21_grace": False,
+            "partial_profit_taken": state.partial_profit_taken,
+            "reduced_on_dma21": state.reduced_on_dma21,
+        }
 
-    # 3. Partial Take Profit
-    if not state.partial_profit_taken and state.shares > (state.initial_shares // 2):
-        r_multiple = (close_price - state.entry_price) / state.initial_risk_per_share if state.initial_risk_per_share > 0 else 0
-        gain_pct = (close_price / state.entry_price - 1.0) if state.entry_price > 0 else 0
-        if r_multiple >= cfg.tp_partial_r or gain_pct >= cfg.tp_partial_pct:
-            target_remaining = state.initial_shares // 2
-            if state.shares > target_remaining:
-                return {
-                    "action": "reduce",
-                    "reason": "partial_tp_1st",
-                    "price": close_price,
-                    "target_remaining_shares": target_remaining,
-                    "partial_profit_taken": True,
-                }
+    # Partial TP は 1回だけ。高値到達で判定。
+    if not state.partial_profit_taken and state.shares > 0:
+        tp_price_r = state.entry_price + cfg.tp_partial_r * state.initial_risk_per_share
+        tp_price_pct = state.entry_price * (1.0 + cfg.tp_partial_pct)
+        tp_hit_price = min(tp_price_r, tp_price_pct)
+        if high_price >= tp_hit_price:
+            target_remaining = math.ceil(state.initial_shares * 0.50)
+            return {
+                "action": "reduce",
+                "reason": "partial_tp_1st",
+                "price": tp_hit_price,
+                "target_remaining_shares": target_remaining,
+                "pending_dma21_grace": state.pending_dma21_grace,
+                "partial_profit_taken": True,
+                "reduced_on_dma21": state.reduced_on_dma21,
+            }
 
-    # 4. 21DMA 管理
+    # 21DMA: small runner に縮小 -> さらに悪化で final exit
     if pd.notna(dma21) and close_price < float(dma21) and state.shares > 0:
         if cfg.use_dma21_tight_low_volume_grace and tight_low_volume and not state.pending_dma21_grace:
-            return {"action": "hold", "reason": "dma21_grace", "pending_dma21_grace": True}
-        
-        # 既に半分利確済みなどの場合 or ホールドスコアが低い場合、21DMA割れで全決済
-        if state.partial_profit_taken or (pd.notna(hold_score) and float(hold_score) < cfg.dma21_exit_after_reduce_threshold):
-            return {"action": "exit_all", "reason": "dma21_exit_final", "price": close_price, "pending_dma21_grace": False}
-        
-        # まだ一度も減らしていないなら、ここで半分に減らす選択肢もあり（今回はホールド優先）
-        return {"action": "hold", "reason": "dma21_hold", "pending_dma21_grace": False}
+            return {
+                "action": "hold",
+                "reason": "dma21_grace",
+                "pending_dma21_grace": True,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": state.reduced_on_dma21,
+            }
 
-    # 5. 10DMA 管理
+        if not state.reduced_on_dma21:
+            if pd.notna(hold_score) and float(hold_score) < cfg.dma21_reduce_threshold:
+                target_remaining = math.ceil(state.initial_shares * cfg.dma21_reduce_to_frac)
+                return {
+                    "action": "reduce",
+                    "reason": "dma21_reduce_to_small_runner",
+                    "price": close_price,
+                    "target_remaining_shares": target_remaining,
+                    "pending_dma21_grace": False,
+                    "partial_profit_taken": state.partial_profit_taken,
+                    "reduced_on_dma21": True,
+                }
+            return {
+                "action": "hold",
+                "reason": "dma21_hold",
+                "pending_dma21_grace": False,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": False,
+            }
+
+        if pd.notna(hold_score) and float(hold_score) < cfg.dma21_exit_after_reduce_threshold:
+            return {
+                "action": "exit_all",
+                "reason": "dma21_exit_after_reduce",
+                "price": close_price,
+                "pending_dma21_grace": False,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": True,
+            }
+
+        return {
+            "action": "hold",
+            "reason": "dma21_runner_hold",
+            "pending_dma21_grace": False,
+            "partial_profit_taken": state.partial_profit_taken,
+            "reduced_on_dma21": True,
+        }
+
     if pd.notna(dma10) and close_price < float(dma10) and state.shares > 0:
         if pd.notna(hold_score) and float(hold_score) < cfg.dma10_exit_threshold:
-            return {"action": "exit_all", "reason": "dma10_holdscore_exit_all", "price": close_price, "pending_dma21_grace": state.pending_dma21_grace}
-        
+            return {
+                "action": "exit_all",
+                "reason": "dma10_holdscore_exit_all",
+                "price": close_price,
+                "pending_dma21_grace": state.pending_dma21_grace,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": state.reduced_on_dma21,
+            }
+
         if pd.notna(hold_score) and float(hold_score) < cfg.dma10_reduce_threshold:
             target_remaining = math.ceil(state.initial_shares * cfg.dma10_reduce_to_frac)
             if state.shares > target_remaining:
@@ -358,9 +425,17 @@ def evaluate_exit_action(
                     "price": close_price,
                     "target_remaining_shares": target_remaining,
                     "pending_dma21_grace": state.pending_dma21_grace,
+                    "partial_profit_taken": state.partial_profit_taken,
+                    "reduced_on_dma21": state.reduced_on_dma21,
                 }
 
-    return {"action": "hold", "reason": "hold", "pending_dma21_grace": False}
+    return {
+        "action": "hold",
+        "reason": "hold",
+        "pending_dma21_grace": False,
+        "partial_profit_taken": state.partial_profit_taken,
+        "reduced_on_dma21": state.reduced_on_dma21,
+    }
 
 
 def signals_from_report(report: pd.DataFrame) -> pd.DataFrame:
@@ -399,13 +474,15 @@ def _to_exit_backtest_config(cfg: BreakoutConfig) -> ExitBacktestConfig:
         adr_limit_mult=cfg.adr_limit_mult,
         fast_fail_days=cfg.fast_fail_days,
         day0_day1_pivot_fail_exit_all=cfg.day0_day1_pivot_fail_exit_all,
+        tp_partial_r=cfg.tp_partial_r,
+        tp_partial_pct=cfg.tp_partial_pct,
         dma10_reduce_to_frac=cfg.dma10_reduce_to_frac,
         dma10_reduce_threshold=cfg.dma10_reduce_threshold,
         dma10_exit_threshold=cfg.dma10_exit_threshold,
+        dma21_reduce_to_frac=cfg.dma21_reduce_to_frac,
+        dma21_reduce_threshold=cfg.dma21_reduce_threshold,
         dma21_exit_after_reduce_threshold=cfg.dma21_exit_after_reduce_threshold,
         use_dma21_tight_low_volume_grace=cfg.use_dma21_tight_low_volume_grace,
-        tp_partial_r=cfg.tp_partial_r,
-        tp_partial_pct=cfg.tp_partial_pct,
         use_intraday_trigger_time=cfg.use_intraday_trigger_time,
         entry_at=cfg.entry_at,
         allow_reentry_same_symbol=cfg.allow_reentry_same_symbol,

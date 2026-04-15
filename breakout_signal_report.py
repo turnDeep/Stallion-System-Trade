@@ -670,7 +670,32 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
     daily_df = _prepare_daily_universe(session_min=session_min, session_max=session_max)
     print(f"Daily universe rows: {len(daily_df):,}")
 
-    report, summary = build_breakout_signal_report(daily_df, pd.DataFrame()) # Intraday loading is handled inside usually or passed
+    # standard 側候補日
+    standard_daily_scored = compute_breakout_scores_with_diag(daily_df)
+    standard_setup_candidates = _prepare_setup_candidates(standard_daily_scored, session_min, session_max)
+
+    # zigzag 側候補日
+    zig_cfg = ZigZagBreakoutConfig()
+    zig_daily = _normalize_zigzag_daily_input(daily_df.copy())
+    zig_daily_scored = compute_zigzag_breakout_scores(zig_daily, cfg=zig_cfg)
+    zig_setup_candidates = zig_daily_scored.loc[zig_daily_scored["setup_candidate"]].copy()
+
+    # union の candidate map を作る
+    candidate_dates_by_symbol: dict[str, set[pd.Timestamp]] = {}
+
+    for source_df in [standard_setup_candidates, zig_setup_candidates]:
+        if source_df.empty:
+            continue
+        work = source_df[["symbol", "date"]].copy()
+        work["date"] = pd.to_datetime(work["date"]).dt.normalize()
+        for symbol, sub in work.groupby("symbol", sort=False):
+            bucket = candidate_dates_by_symbol.setdefault(str(symbol), set())
+            bucket.update(set(sub["date"].tolist()))
+
+    intraday_df = _prepare_intraday_for_candidates(candidate_dates_by_symbol)
+    print(f"Intraday rows for candidate sessions: {len(intraday_df):,}")
+
+    report, summary = build_breakout_signal_report(daily_df, intraday_df)
 
     detail_cols = [
         "date",
@@ -687,10 +712,13 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
         "entry_source",
         "entry_lane",
     ]
-    report_to_save = report[[c for c in detail_cols if c in report.columns]]
+    report_to_save = report[[c for c in detail_cols if c in report.columns]].copy()
 
     report_to_save.to_csv(OUT_DIR / "setup_breakout_details.csv", index=False)
-    report_to_save.loc[report["breakout_signal"]].to_csv(OUT_DIR / "breakout_signals_only.csv", index=False)
+    report_to_save.loc[report["breakout_signal"].fillna(False)].to_csv(
+        OUT_DIR / "breakout_signals_only.csv",
+        index=False,
+    )
     summary.to_csv(OUT_DIR / "daily_summary.csv", index=False)
 
     return report, summary

@@ -171,6 +171,7 @@ def _position_state_from_row(row: dict[str, Any]) -> BreakoutPositionState | Non
         entry_bar_time=None if pd.isna(entry_bar_time) else entry_bar_time,
         pending_dma21_grace=bool(payload.get("pending_dma21_grace", False)),
         partial_profit_taken=bool(payload.get("partial_profit_taken", False)),
+        reduced_on_dma21=bool(payload.get("reduced_on_dma21", False)),
         entry_source=str(payload.get("entry_source", "standard_breakout")),
         entry_lane=str(payload.get("entry_lane", "none")),
     )
@@ -211,6 +212,7 @@ def _upsert_demo_position(
                         "trigger_time": None if state.entry_bar_time is None else str(state.entry_bar_time),
                         "pending_dma21_grace": state.pending_dma21_grace,
                         "partial_profit_taken": state.partial_profit_taken,
+                        "reduced_on_dma21": state.reduced_on_dma21,
                         "entry_source": state.entry_source,
                         "entry_lane": state.entry_lane,
                     },
@@ -348,9 +350,11 @@ def _evaluate_end_of_day_exits(
         if latest is None:
             survivors.append(row)
             continue
-        action = evaluate_exit_action(state, pd.Series(latest._asdict()), cfg=cfg)
+        action = evaluate_exit_action(state, row, cfg=cfg)
         payload = _payload_dict(row.get("payload_json"))
         payload["pending_dma21_grace"] = bool(action.get("pending_dma21_grace", False))
+        payload["partial_profit_taken"] = bool(action.get("partial_profit_taken", state.partial_profit_taken))
+        payload["reduced_on_dma21"] = bool(action.get("reduced_on_dma21", state.reduced_on_dma21))
 
         if action.get("action") == "reduce":
             target_remaining = int(action.get("target_remaining_shares", state.shares))
@@ -378,9 +382,9 @@ def _evaluate_end_of_day_exits(
                         reason=str(action.get("reason", "reduce")),
                     )
                 state.shares = target_remaining
-            # アクションの結果として state が変わった場合（partial_profit_takenなど）も常に更新をかける
             state.pending_dma21_grace = bool(action.get("pending_dma21_grace", False))
             state.partial_profit_taken = bool(action.get("partial_profit_taken", state.partial_profit_taken))
+            state.reduced_on_dma21 = bool(action.get("reduced_on_dma21", state.reduced_on_dma21))
             _upsert_demo_position(store, state=state, session_date=session_date)
             continue
 
