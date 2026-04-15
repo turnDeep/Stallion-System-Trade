@@ -170,6 +170,9 @@ def _position_state_from_row(row: dict[str, Any]) -> BreakoutPositionState | Non
         initial_risk_per_share=max(entry_price - initial_stop, 0.0),
         entry_bar_time=None if pd.isna(entry_bar_time) else entry_bar_time,
         pending_dma21_grace=bool(payload.get("pending_dma21_grace", False)),
+        partial_profit_taken=bool(payload.get("partial_profit_taken", False)),
+        entry_source=str(payload.get("entry_source", "standard_breakout")),
+        entry_lane=str(payload.get("entry_lane", "none")),
     )
 
 
@@ -207,6 +210,9 @@ def _upsert_demo_position(
                         "initial_shares": state.initial_shares,
                         "trigger_time": None if state.entry_bar_time is None else str(state.entry_bar_time),
                         "pending_dma21_grace": state.pending_dma21_grace,
+                        "partial_profit_taken": state.partial_profit_taken,
+                        "entry_source": state.entry_source,
+                        "entry_lane": state.entry_lane,
                     },
                     ensure_ascii=True,
                 ),
@@ -372,9 +378,10 @@ def _evaluate_end_of_day_exits(
                         reason=str(action.get("reason", "reduce")),
                     )
                 state.shares = target_remaining
-            if state.shares > 0:
-                state.pending_dma21_grace = bool(action.get("pending_dma21_grace", False))
-                _upsert_demo_position(store, state=state, session_date=session_date)
+            # アクションの結果として state が変わった場合（partial_profit_takenなど）も常に更新をかける
+            state.pending_dma21_grace = bool(action.get("pending_dma21_grace", False))
+            state.partial_profit_taken = bool(action.get("partial_profit_taken", state.partial_profit_taken))
+            _upsert_demo_position(store, state=state, session_date=session_date)
             continue
 
         if action.get("action") == "exit_all":
@@ -582,6 +589,9 @@ def run_live_trader(settings: Settings | None = None) -> None:
                 "leader_score": getattr(row, "leader_score", None),
                 "setup_score_pre": getattr(row, "setup_score_pre", None),
                 "trigger_score": getattr(row, "trigger_score", None),
+                "entry_source": getattr(row, "entry_source", "standard_breakout"),
+                "entry_lane": getattr(row, "entry_lane", "none"),
+                "priority_score_within_source": getattr(row, "priority_score_within_source", None),
             }
             submitted = _submit_order(
                 store,

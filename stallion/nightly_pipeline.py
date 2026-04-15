@@ -17,24 +17,17 @@ LOGGER = logging.getLogger(__name__)
 
 def _build_daily_summary(report: pd.DataFrame) -> pd.DataFrame:
     if report.empty:
-        return pd.DataFrame(
-            columns=[
-                "date",
-                "setup_count",
-                "normal_setup_count",
-                "override_setup_count",
-                "breakout_count",
-                "breakout_signal_count",
-            ]
-        )
+        return pd.DataFrame()
+    
+    # breakout_signal_report.py 側の summary を優先
+    # が、念の為ここでも集計ロジックを更新
     return (
         report.groupby("date", as_index=False)
         .agg(
-            setup_count=("symbol", "size"),
-            normal_setup_count=("setup_tier", lambda s: int((s == "normal").sum())),
-            override_setup_count=("setup_tier", lambda s: int((s == "override").sum())),
-            breakout_count=("broke_out", "sum"),
-            breakout_signal_count=("breakout_signal", "sum"),
+            setup_count=("setup_candidate", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            breakout_signal_count=("breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            standard_breakout_count=("standard_breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum()) if "standard_breakout_signal" in report.columns else 0),
+            zigzag_breakout_count=("zigzag_breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum()) if "zigzag_breakout_signal" in report.columns else 0),
         )
         .sort_values("date")
         .reset_index(drop=True)
@@ -220,16 +213,29 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     full_intraday_bars["ts"] = pd.to_datetime(full_intraday_bars["ts"], utc=True, errors="coerce")
 
     daily_signal_bars = full_daily_bars.loc[full_daily_bars["symbol"].ne("SPY")].copy()
-    report = build_breakout_signal_report(daily_signal_bars, full_intraday_bars, cfg=cfg)
-    summary = _build_daily_summary(report)
+    report, summary = build_breakout_signal_report(daily_signal_bars, full_intraday_bars, cfg=cfg)
 
     latest_date = pd.to_datetime(report["date"]).max().normalize() if not report.empty else pd.Timestamp.utcnow().normalize()
+    
+    # shortlist 生成: セットアップ候補 or 当日組シグナル発生銘柄
+    shortlist_pool = report.loc[report["date"].eq(latest_date)].copy()
+    mask = shortlist_pool["setup_candidate"].fillna(False) | shortlist_pool["breakout_signal"].fillna(False)
+    
+    sort_cols = []
+    ascending = []
+    if "entry_priority_bucket" in shortlist_pool.columns:
+        sort_cols.append("entry_priority_bucket")
+        ascending.append(True)
+    if "priority_score_within_source" in shortlist_pool.columns:
+        sort_cols.append("priority_score_within_source")
+        ascending.append(False)
+    
+    sort_cols.extend(["leader_score", "setup_score_pre", "symbol"])
+    ascending.extend([False, False, True])
+
     shortlist = (
-        report.loc[
-            report["date"].eq(latest_date)
-            & report["setup_candidate"].fillna(False)
-        ]
-        .sort_values(["leader_score", "setup_score_pre", "symbol"], ascending=[False, False, True], kind="mergesort")
+        shortlist_pool.loc[mask]
+        .sort_values(sort_cols, ascending=ascending, kind="mergesort")
         .head(settings.runtime.shortlist_count)
         .copy()
     )

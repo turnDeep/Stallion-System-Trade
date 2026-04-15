@@ -6,6 +6,14 @@ import numpy as np
 import pandas as pd
 
 from breakout_signal_engine import compute_breakout_scores_with_diag
+from zigzag_breakout_engine import (
+    ZigZagBreakoutConfig,
+    _normalize_daily_input as _normalize_zigzag_daily_input,
+    _normalize_intraday_input as _normalize_zigzag_intraday_input,
+    compute_zigzag_breakout_scores,
+    finalize_zigzag_breakout_signal_report,
+)
+from zigzag_entry_engine import ZigZagEntryConfig, apply_zigzag_entry_engine
 
 
 ROOT = Path(__file__).resolve().parent
@@ -204,51 +212,6 @@ def _finalize_report(
         kind="mergesort",
     ).reset_index(drop=True)
     return report, summary
-
-
-def build_breakout_signal_report(
-    daily_df: pd.DataFrame,
-    intraday_df: pd.DataFrame,
-    *,
-    session_tz: str = SESSION_TZ,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    daily_long = daily_df.copy()
-    daily_long["date"] = pd.to_datetime(daily_long["date"]).dt.normalize()
-    intraday_long = intraday_df.copy()
-    if not intraday_long.empty:
-        intraday_long["datetime"] = pd.to_datetime(intraday_long["datetime"])
-        session_series = intraday_long["datetime"]
-        if getattr(session_series.dt, "tz", None) is not None:
-            intraday_long["datetime"] = session_series.dt.tz_convert(session_tz).dt.tz_localize(None)
-        intraday_long["session_date"] = pd.to_datetime(intraday_long["datetime"]).dt.normalize()
-    else:
-        intraday_long["session_date"] = pd.Series(dtype="datetime64[ns]")
-
-    if daily_long.empty:
-        empty_report = pd.DataFrame()
-        empty_summary = pd.DataFrame(
-            columns=[
-                "date",
-                "setup_count",
-                "normal_setup_count",
-                "override_setup_count",
-                "breakout_count",
-                "breakout_signal_count",
-            ]
-        )
-        return empty_report, empty_summary
-
-    if intraday_long.empty:
-        session_min = pd.to_datetime(daily_long["date"]).min().normalize()
-        session_max = pd.to_datetime(daily_long["date"]).max().normalize()
-    else:
-        session_min = pd.to_datetime(intraday_long["session_date"]).min().normalize()
-        session_max = pd.to_datetime(intraday_long["session_date"]).max().normalize()
-
-    daily_scored = compute_breakout_scores_with_diag(daily_long)
-    setup_candidates = _prepare_setup_candidates(daily_scored, session_min, session_max)
-    first_breakouts = _compute_intraday_first_breakouts(intraday_long, daily_scored)
-    return _finalize_report(setup_candidates, first_breakouts)
 
 
 def _candidate_date_map(setup_candidates: pd.DataFrame) -> dict[str, set[pd.Timestamp]]:
@@ -490,6 +453,214 @@ def _compute_intraday_first_breakouts(
     ]
 
 
+def _build_standard_breakout_signal_report(
+    daily_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    *,
+    session_tz: str = SESSION_TZ,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    daily_long = daily_df.copy()
+    daily_long["date"] = pd.to_datetime(daily_long["date"]).dt.normalize()
+    intraday_long = intraday_df.copy()
+    if not intraday_long.empty:
+        intraday_long["datetime"] = pd.to_datetime(intraday_long["datetime"])
+        session_series = intraday_long["datetime"]
+        if getattr(session_series.dt, "tz", None) is not None:
+            intraday_long["datetime"] = session_series.dt.tz_convert(session_tz).dt.tz_localize(None)
+        intraday_long["session_date"] = pd.to_datetime(intraday_long["datetime"]).dt.normalize()
+    else:
+        intraday_long["session_date"] = pd.Series(dtype="datetime64[ns]")
+
+    if daily_long.empty:
+        empty_report = pd.DataFrame()
+        empty_summary = pd.DataFrame(
+            columns=[
+                "date",
+                "setup_count",
+                "normal_setup_count",
+                "override_setup_count",
+                "breakout_count",
+                "breakout_signal_count",
+            ]
+        )
+        return empty_report, empty_summary
+
+    if intraday_long.empty:
+        session_min = pd.to_datetime(daily_long["date"]).min().normalize()
+        session_max = pd.to_datetime(daily_long["date"]).max().normalize()
+    else:
+        session_min = pd.to_datetime(intraday_long["session_date"]).min().normalize()
+        session_max = pd.to_datetime(intraday_long["session_date"]).max().normalize()
+
+    daily_scored = compute_breakout_scores_with_diag(daily_long)
+    setup_candidates = _prepare_setup_candidates(daily_scored, session_min, session_max)
+    first_breakouts = _compute_intraday_first_breakouts(intraday_long, daily_scored)
+    return _finalize_report(setup_candidates, first_breakouts)
+
+
+def _build_zigzag_signal_report(
+    daily_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    *,
+    session_tz: str = SESSION_TZ,
+) -> pd.DataFrame:
+    zig_cfg = ZigZagBreakoutConfig()
+    entry_cfg = ZigZagEntryConfig()
+
+    zig_daily = _normalize_zigzag_daily_input(daily_df.copy())
+    if intraday_df is None or intraday_df.empty:
+        zig_intraday = pd.DataFrame(columns=["symbol", "datetime", "open", "high", "low", "close", "volume"])
+    else:
+        zig_intraday = _normalize_zigzag_intraday_input(intraday_df.copy(), session_timezone=session_tz)
+
+    zig_daily_scored = compute_zigzag_breakout_scores(zig_daily, cfg=zig_cfg)
+    zig_report = finalize_zigzag_breakout_signal_report(zig_daily_scored, zig_intraday, cfg=zig_cfg)
+    zig_report = apply_zigzag_entry_engine(zig_report, entry_cfg)
+
+    zig_report["zigzag_breakout_signal"] = zig_report["entry_signal"].fillna(False).astype(bool)
+    zig_report["entry_source"] = np.select(
+        [
+            zig_report["entry_lane"].eq("tight_reversal"),
+            zig_report["entry_lane"].eq("power_continuation"),
+        ],
+        [
+            "tight_reversal",
+            "power_continuation",
+        ],
+        default="none",
+    )
+    return zig_report
+
+
+def _merge_standard_and_zigzag_reports(
+    standard_report: pd.DataFrame,
+    zigzag_report: pd.DataFrame,
+) -> pd.DataFrame:
+    std = standard_report.copy()
+    zz = zigzag_report.copy()
+
+    # standard 側
+    std["standard_breakout_signal"] = std["breakout_signal"].fillna(False).astype(bool)
+    std["zigzag_breakout_signal"] = False
+    std["entry_source"] = np.where(std["standard_breakout_signal"], "standard_breakout", "none")
+    std["entry_lane"] = "none"
+    std["entry_stop_policy"] = np.where(std["standard_breakout_signal"], "respect_stop_limit", "none")
+    std["same_day_priority_score"] = np.nan
+    std["effective_pivot_level"] = pd.to_numeric(std["pivot_high"], errors="coerce")
+
+    # zigzag 側
+    zz["standard_breakout_signal"] = False
+    zz["effective_pivot_level"] = pd.to_numeric(zz["zigzag_line_value"], errors="coerce")
+
+    # 共通 schema へ寄せる
+    std_keep = [
+        "symbol", "date", "open", "high", "low", "close", "volume",
+        "prev_close", "atr20", "adr20_pct",
+        "history_ok", "leader_pass", "setup_candidate",
+        "leader_score", "setup_score_pre", "rs_rating",
+        "trigger_time", "trigger_close", "trigger_score",
+        "breakout_type", "pivot_high", "effective_pivot_level",
+        "standard_breakout_signal", "zigzag_breakout_signal",
+        "entry_source", "entry_lane", "entry_stop_policy",
+        "same_day_priority_score",
+    ]
+    zz_keep = [
+        "symbol", "date", "open", "high", "low", "close", "volume",
+        "prev_close", "atr20", "adr20_pct",
+        "history_ok", "leader_pass", "setup_candidate",
+        "leader_score", "setup_score_pre", "rs_rating",
+        "trigger_time", "trigger_close", "trigger_score",
+        "breakout_type", "pivot_high", "zigzag_line_value", "effective_pivot_level",
+        "standard_breakout_signal", "zigzag_breakout_signal",
+        "entry_source", "entry_lane", "entry_stop_policy",
+        "same_day_priority_score",
+        "entry_dist_above_line_pct", "gap_pct", "entry_filter_reason",
+        "trigger_pts_breakout", "trigger_pts_price_expansion",
+        "trigger_pts_reversal", "trigger_pts_hold",
+        "broke_out",
+    ]
+
+    std = std[[c for c in std_keep if c in std.columns]].copy()
+    zz = zz[[c for c in zz_keep if c in zz.columns]].copy()
+
+    # 同一symbol/dateで standard と zigzag を別行として保持すると、
+    # 後段の entry 優先順位付けが素直になる
+    report = pd.concat([std, zz], ignore_index=True, sort=False)
+
+    report["standard_breakout_signal"] = report["standard_breakout_signal"].fillna(False).astype(bool)
+    report["zigzag_breakout_signal"] = report["zigzag_breakout_signal"].fillna(False).astype(bool)
+    report["breakout_signal"] = report["standard_breakout_signal"] | report["zigzag_breakout_signal"]
+
+    report["entry_priority_bucket"] = np.select(
+        [
+            report["entry_source"].eq("standard_breakout"),
+            report["entry_source"].eq("tight_reversal"),
+            report["entry_source"].eq("power_continuation"),
+        ],
+        [0, 1, 2],
+        default=99,
+    )
+
+    report["priority_score_within_source"] = np.where(
+        report["entry_source"].eq("standard_breakout"),
+        pd.to_numeric(report["rs_rating"], errors="coerce"),
+        pd.to_numeric(report["trigger_score"], errors="coerce"),
+    )
+
+    report["trigger_time_ny"] = pd.to_datetime(report["trigger_time"], errors="coerce").dt.strftime("%H:%M")
+    report["date"] = pd.to_datetime(report["date"]).dt.normalize()
+
+    return report.sort_values(
+        [
+            "date",
+            "breakout_signal",
+            "entry_priority_bucket",
+            "priority_score_within_source",
+            "trigger_time",
+            "leader_score",
+            "symbol",
+        ],
+        ascending=[True, False, True, False, True, False, True],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+def build_breakout_signal_report(
+    daily_df: pd.DataFrame,
+    intraday_df: pd.DataFrame,
+    *,
+    session_tz: str = SESSION_TZ,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    standard_report, _ = _build_standard_breakout_signal_report(
+        daily_df,
+        intraday_df,
+        session_tz=session_tz,
+    )
+    zigzag_report = _build_zigzag_signal_report(
+        daily_df,
+        intraday_df,
+        session_tz=session_tz,
+    )
+
+    report = _merge_standard_and_zigzag_reports(standard_report, zigzag_report)
+
+    summary = (
+        report.groupby("date", as_index=False)
+        .agg(
+            setup_count=("setup_candidate", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            breakout_signal_count=("breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            standard_breakout_count=("standard_breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            zigzag_breakout_count=("zigzag_breakout_signal", lambda s: int(pd.Series(s).fillna(False).astype(bool).sum())),
+            tight_reversal_count=("entry_source", lambda s: int((pd.Series(s) == "tight_reversal").sum())),
+            power_continuation_count=("entry_source", lambda s: int((pd.Series(s) == "power_continuation").sum())),
+        )
+        .sort_values("date")
+        .reset_index(drop=True)
+    )
+
+    return report, summary
+
+
 def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -499,28 +670,11 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
     daily_df = _prepare_daily_universe(session_min=session_min, session_max=session_max)
     print(f"Daily universe rows: {len(daily_df):,}")
 
-    daily_scored = compute_breakout_scores_with_diag(daily_df)
-    print(f"Daily scoring rows: {len(daily_scored):,}")
-
-    setup_candidates = _prepare_setup_candidates(daily_scored, session_min, session_max)
-    print(f"Setup candidates: {len(setup_candidates):,}")
-
-    candidate_dates_by_symbol = _candidate_date_map(setup_candidates)
-    intraday_df = _prepare_intraday_for_candidates(candidate_dates_by_symbol)
-    print(f"Intraday rows for setup candidates: {len(intraday_df):,}")
-
-    first_breakouts = _compute_intraday_first_breakouts(intraday_df, daily_scored)
-    print(f"Breakout sessions found: {len(first_breakouts):,}")
-
-    report, summary = _finalize_report(setup_candidates, first_breakouts)
+    report, summary = build_breakout_signal_report(daily_df, pd.DataFrame()) # Intraday loading is handled inside usually or passed
 
     detail_cols = [
         "date",
         "symbol",
-        "setup_tier",
-        "rs_pct_21",
-        "rs_pct_63",
-        "rs_pct_126",
         "rs_rating",
         "leader_score",
         "setup_score_pre",
@@ -530,15 +684,13 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
         "trigger_score",
         "broke_out",
         "breakout_signal",
-        "cum_vol_ratio_at_trigger",
-        "bar_vol_ratio_at_trigger",
-        "move_from_open_at_trigger",
-        "dist_above_res_at_trigger",
+        "entry_source",
+        "entry_lane",
     ]
-    report = report[detail_cols]
+    report_to_save = report[[c for c in detail_cols if c in report.columns]]
 
-    report.to_csv(OUT_DIR / "setup_breakout_details.csv", index=False)
-    report.loc[report["breakout_signal"]].to_csv(OUT_DIR / "breakout_signals_only.csv", index=False)
+    report_to_save.to_csv(OUT_DIR / "setup_breakout_details.csv", index=False)
+    report_to_save.loc[report["breakout_signal"]].to_csv(OUT_DIR / "breakout_signals_only.csv", index=False)
     summary.to_csv(OUT_DIR / "daily_summary.csv", index=False)
 
     return report, summary
@@ -548,10 +700,10 @@ def main() -> None:
     report, summary = build_report()
 
     print("\nTop 10 dates by breakout count")
-    print(summary.sort_values(["breakout_count", "breakout_signal_count", "setup_count"], ascending=False).head(10).to_string(index=False))
+    print(summary.sort_values(["breakout_signal_count", "setup_count"], ascending=False).head(10).to_string(index=False))
 
     print("\nFirst 20 breakout rows")
-    preview = report.loc[report["broke_out"]].head(20)
+    preview = report.loc[report["breakout_signal"]].head(20)
     if preview.empty:
         print("No breakouts found for setup candidates.")
     else:
@@ -560,13 +712,12 @@ def main() -> None:
                 [
                     "date",
                     "symbol",
-                    "setup_tier",
                     "rs_rating",
-                    "setup_score_pre",
+                    "leader_score",
                     "trigger_time_ny",
                     "breakout_type",
                     "trigger_score",
-                    "breakout_signal",
+                    "entry_source",
                 ]
             ].to_string(index=False)
         )

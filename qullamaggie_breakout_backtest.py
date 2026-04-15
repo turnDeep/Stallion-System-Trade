@@ -21,32 +21,34 @@ class BacktestConfig:
     max_positions: int = 5
 
     # position sizing
-    risk_pct_per_trade: float = 1.0        # Risk cap removed (100%), relies on alloc cap
-    max_alloc_pct_per_trade: float = 0.25  # 25% of equity cap
+    risk_pct_per_trade: float = 1.0
+    max_alloc_pct_per_trade: float = 0.25
 
     # costs
     commission_rate: float = 0.00132
     slippage_bps: float = 5.0
 
     # exclude EP-like signals
-    ep_gap_exclusion_pct: float = 0.10     # 10% gap-up以上は除外
+    ep_gap_exclusion_pct: float = 0.10
 
     # initial stop
-    stop_buffer_bps: float = 10.0          # 0.10%
+    stop_buffer_bps: float = 10.0
     atr_limit_mult: float = 1.0
     adr_limit_mult: float = 1.0
 
     # early failure
-    fast_fail_days: int = 1                # entry day + next day
+    fast_fail_days: int = 1
     day0_day1_pivot_fail_exit_all: bool = True
 
     # runner management
-    dma10_reduce_to_frac: float = 0.25     # hold_score < 55 で initial の 25% まで縮小
+    tp_partial_r: float = 1.75
+    tp_partial_pct: float = 0.10
+    dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
     dma10_exit_threshold: float = 50.0
 
     # 21DMA handling
-    dma21_exit_threshold: float = 45.0
+    dma21_exit_after_reduce_threshold: float = 45.0
     use_dma21_tight_low_volume_grace: bool = True
 
     # signal filter
@@ -54,7 +56,7 @@ class BacktestConfig:
 
     # entry execution
     use_intraday_trigger_time: bool = True
-    entry_at: str = "trigger_close"        # trigger_close or day_close_fallback
+    entry_at: str = "trigger_close"
 
     # portfolio behavior
     allow_reentry_same_symbol: bool = False
@@ -75,6 +77,9 @@ class Position:
     initial_risk_per_share: float
 
     pending_dma21_grace: bool = False
+    partial_profit_taken: bool = False
+    entry_source: str = "standard_breakout"
+    entry_lane: str = "none"
 
 
 @dataclass
@@ -316,7 +321,7 @@ def prepare_daily(daily: pd.DataFrame) -> pd.DataFrame:
 
 
 def prepare_signals(signals: pd.DataFrame) -> pd.DataFrame:
-    required = {"symbol", "date", "breakout_signal", "pivot_high"}
+    required = {"symbol", "date", "breakout_signal"}
     missing = required - set(signals.columns)
     if missing:
         raise ValueError(f"signals missing columns: {sorted(missing)}")
@@ -324,7 +329,13 @@ def prepare_signals(signals: pd.DataFrame) -> pd.DataFrame:
     sig = signals.copy()
     sig["date"] = pd.to_datetime(sig["date"]).dt.normalize()
     sig["breakout_signal"] = sig["breakout_signal"].astype(bool)
-    sig["pivot_high"] = pd.to_numeric(sig["pivot_high"], errors="coerce")
+
+    if "effective_pivot_level" in sig.columns:
+        sig["pivot_high"] = pd.to_numeric(sig["effective_pivot_level"], errors="coerce")
+    elif "pivot_high" in sig.columns:
+        sig["pivot_high"] = pd.to_numeric(sig["pivot_high"], errors="coerce")
+    else:
+        sig["pivot_high"] = np.nan
 
     if "trigger_time" in sig.columns:
         sig["trigger_time"] = pd.to_datetime(sig["trigger_time"], errors="coerce")
@@ -524,6 +535,31 @@ def run_backtest(
                 closed_symbols_once.add(sym)
                 continue
 
+            # A) 非防御層：Partial Take Profit
+            if not pos.partial_profit_taken and pos.shares > (pos.initial_shares // 2):
+                r_multiple = (row_close - pos.entry_price) / pos.initial_risk_per_share if pos.initial_risk_per_share > 0 else 0
+                gain_pct = (row_close / pos.entry_price - 1.0) if pos.entry_price > 0 else 0
+                if r_multiple >= cfg.tp_partial_r or gain_pct >= cfg.tp_partial_pct:
+                    target_remaining = pos.initial_shares // 2
+                    if pos.shares > target_remaining:
+                        cash = sell_down_to_target(
+                            pos=pos,
+                            target_remaining_shares=target_remaining,
+                            date=cur_date,
+                            price=row_close,
+                            reason="partial_tp_1st",
+                            bar_time=None,
+                            fills=fills,
+                            cfg=cfg,
+                            cash=cash,
+                        )
+                        pos.partial_profit_taken = True
+
+            if pos.shares == 0:
+                del open_positions[sym]
+                closed_symbols_once.add(sym)
+                continue
+
             # D) 21DMA: low-volume tight pullbackなら1日猶予
             if not pd.isna(row_dma21) and row_close < row_dma21 and pos.shares > 0:
                 if (
@@ -534,13 +570,13 @@ def run_backtest(
                     pos.pending_dma21_grace = True
                     continue
 
-                if row_hold_score < cfg.dma21_exit_threshold:
+                if pos.partial_profit_taken or row_hold_score < cfg.dma21_exit_after_reduce_threshold:
                     cash = sell_down_to_target(
                         pos=pos,
                         target_remaining_shares=0,
                         date=cur_date,
                         price=row_close,
-                        reason="dma21_holdscore_exit",
+                        reason="dma21_exit_final",
                         bar_time=None,
                         fills=fills,
                         cfg=cfg,
@@ -560,7 +596,7 @@ def run_backtest(
                 closed_symbols_once.add(sym)
                 continue
 
-            # C) runner管理: close < dma10 でも即売りしない
+            # C) runner管理: close < dma10 
             if not pd.isna(row_dma10) and row_close < row_dma10 and pos.shares > 0:
                 if row_hold_score < cfg.dma10_exit_threshold:
                     cash = sell_down_to_target(
@@ -576,17 +612,18 @@ def run_backtest(
                     )
                 elif row_hold_score < cfg.dma10_reduce_threshold:
                     target_remaining = math.ceil(pos.initial_shares * cfg.dma10_reduce_to_frac)
-                    cash = sell_down_to_target(
-                        pos=pos,
-                        target_remaining_shares=target_remaining,
-                        date=cur_date,
-                        price=row_close,
-                        reason="dma10_holdscore_reduce",
-                        bar_time=None,
-                        fills=fills,
-                        cfg=cfg,
-                        cash=cash,
-                    )
+                    if pos.shares > target_remaining:
+                        cash = sell_down_to_target(
+                            pos=pos,
+                            target_remaining_shares=target_remaining,
+                            date=cur_date,
+                            price=row_close,
+                            reason="dma10_holdscore_reduce",
+                            bar_time=None,
+                            fills=fills,
+                            cfg=cfg,
+                            cash=cash,
+                        )
 
                 if pos.shares == 0:
                     del open_positions[sym]
@@ -601,12 +638,18 @@ def run_backtest(
             # 優先順位付け（同時に発火した場合の枠割り当ての厳選）
             sort_cols = []
             sort_asc = []
+            if "entry_priority_bucket" in todays.columns:
+                sort_cols.append("entry_priority_bucket")
+                sort_asc.append(True)
+            if "priority_score_within_source" in todays.columns:
+                sort_cols.append("priority_score_within_source")
+                sort_asc.append(False)
             if "leader_score" in todays.columns:
                 sort_cols.append("leader_score")
-                sort_asc.append(False)  # 高いRSを優先
+                sort_asc.append(False)
             if "trigger_time" in todays.columns:
                 sort_cols.append("trigger_time")
-                sort_asc.append(True)   # 朝一番に早抜けした銘柄を優先
+                sort_asc.append(True)
             sort_cols.append("symbol")
             sort_asc.append(True)
             
@@ -659,11 +702,14 @@ def run_backtest(
                 if not np.isfinite(risk_per_share) or risk_per_share <= 0:
                     continue
 
-                atr_limit = float(row.atr20) * cfg.atr_limit_mult if pd.notna(row.atr20) else np.nan
-                adr_limit = float(row.adr20_pct) * entry_price * cfg.adr_limit_mult if pd.notna(row.adr20_pct) else np.nan
-                stop_limit = np.nanmin([atr_limit, adr_limit]) if not (pd.isna(atr_limit) and pd.isna(adr_limit)) else np.nan
-                if pd.notna(stop_limit) and risk_per_share > stop_limit:
-                    continue
+                # stop limit check (standard only or based on policy)
+                entry_stop_policy = str(getattr(row, "entry_stop_policy", "respect_stop_limit"))
+                if entry_stop_policy == "respect_stop_limit":
+                    atr_limit = float(row.atr20) * cfg.atr_limit_mult if pd.notna(row.atr20) else np.nan
+                    adr_limit = float(row.adr20_pct) * entry_price * cfg.adr_limit_mult if pd.notna(row.adr20_pct) else np.nan
+                    stop_limit = np.nanmin([atr_limit, adr_limit]) if not (pd.isna(atr_limit) and pd.isna(adr_limit)) else np.nan
+                    if pd.notna(stop_limit) and risk_per_share > stop_limit:
+                        continue
 
                 equity = equity_on_date(cur_date)
                 risk_budget = equity * cfg.risk_pct_per_trade
@@ -704,6 +750,8 @@ def run_backtest(
                     initial_shares=shares,
                     shares=shares,
                     initial_risk_per_share=exec_price - initial_stop,
+                    entry_source=str(getattr(row, "entry_source", "standard_breakout")),
+                    entry_lane=str(getattr(row, "entry_lane", "none")),
                 )
                 open_positions[row.symbol] = pos
 
