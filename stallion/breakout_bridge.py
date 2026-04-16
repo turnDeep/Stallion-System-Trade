@@ -175,12 +175,12 @@ def build_breakout_signal_report(
     daily_bars: Any,
     intraday_bars: Any,
     cfg: BreakoutConfig | None = None,
-) -> pd.DataFrame:
+) -> tuple[pd.DataFrame, pd.DataFrame]:
     cfg = cfg or BreakoutConfig()
     daily = normalize_daily_bars(daily_bars, session_timezone=cfg.session_timezone)
     intraday = normalize_intraday_bars(intraday_bars, session_timezone=cfg.session_timezone)
-    report, _ = _build_breakout_signal_report(daily, intraday, session_tz=cfg.session_timezone)
-    return report
+    report, summary = _build_breakout_signal_report(daily, intraday, session_tz=cfg.session_timezone)
+    return report, summary
 
 
 def select_breakout_candidates(

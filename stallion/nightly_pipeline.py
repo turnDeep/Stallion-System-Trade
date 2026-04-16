@@ -236,6 +236,7 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     shortlist = (
         shortlist_pool.loc[mask]
         .sort_values(sort_cols, ascending=ascending, kind="mergesort")
+        .drop_duplicates(subset=["symbol"])
         .head(settings.runtime.shortlist_count)
         .copy()
     )
