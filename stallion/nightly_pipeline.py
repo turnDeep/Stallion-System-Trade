@@ -10,6 +10,7 @@ from .breakout_bridge import BreakoutConfig, build_breakout_signal_report
 from .config import Settings, load_settings
 from .fmp import FMPClient, download_yfinance_bars
 from .storage import SQLiteParquetStore
+from industry_priority import add_industry_composite_priority
 
 
 LOGGER = logging.getLogger(__name__)
@@ -214,6 +215,8 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
 
     daily_signal_bars = full_daily_bars.loc[full_daily_bars["symbol"].ne("SPY")].copy()
     report, summary = build_breakout_signal_report(daily_signal_bars, full_intraday_bars, cfg=cfg)
+    if cfg.use_industry_composite_priority:
+        report = add_industry_composite_priority(report, full_daily_bars, store.load_universe())
 
     latest_date = pd.to_datetime(report["date"]).max().normalize() if not report.empty else pd.Timestamp.utcnow().normalize()
     
@@ -223,6 +226,9 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     
     sort_cols = []
     ascending = []
+    if "same_day_priority_score" in shortlist_pool.columns:
+        sort_cols.append("same_day_priority_score")
+        ascending.append(False)
     if "entry_priority_bucket" in shortlist_pool.columns:
         sort_cols.append("entry_priority_bucket")
         ascending.append(True)
@@ -242,6 +248,8 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
     )
     shortlist["session_date"] = latest_date
     shortlist["next_session_date"] = latest_date + pd.offsets.BDay(1)
+    if "same_day_priority_score" in shortlist.columns:
+        shortlist["shortlist_score"] = pd.to_numeric(shortlist["same_day_priority_score"], errors="coerce")
 
     shortlist_session_key = latest_date + pd.offsets.BDay(1)
     if not shortlist.empty:

@@ -54,6 +54,9 @@ class RuntimeConfig:
     use_intraday_trigger_time: bool = True
     entry_at: str = "trigger_close"
     allow_reentry_same_symbol: bool = False
+    use_industry_composite_priority: bool = True
+    enable_a_plus_replacement: bool = True
+    replacement_score_margin: float = 18.0
     min_price: float = 5.0
     min_daily_volume: float = 1_000_000.0
     min_dollar_volume: float = 10_000_000.0

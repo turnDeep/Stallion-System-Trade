@@ -46,6 +46,9 @@ class BreakoutConfig:
     use_intraday_trigger_time: bool = True
     entry_at: str = "trigger_close"
     allow_reentry_same_symbol: bool = False
+    use_industry_composite_priority: bool = True
+    enable_a_plus_replacement: bool = True
+    replacement_score_margin: float = 18.0
 
     @classmethod
     def from_settings(cls, settings: Any) -> "BreakoutConfig":
@@ -77,6 +80,9 @@ class BreakoutConfig:
             use_intraday_trigger_time=bool(getattr(runtime, "use_intraday_trigger_time", True)),
             entry_at=str(getattr(runtime, "entry_at", "trigger_close")),
             allow_reentry_same_symbol=bool(getattr(runtime, "allow_reentry_same_symbol", False)),
+            use_industry_composite_priority=bool(getattr(runtime, "use_industry_composite_priority", True)),
+            enable_a_plus_replacement=bool(getattr(runtime, "enable_a_plus_replacement", True)),
+            replacement_score_margin=float(getattr(runtime, "replacement_score_margin", 18.0)),
         )
 
 
@@ -97,6 +103,8 @@ class BreakoutPositionState:
     reduced_on_dma21: bool = False
     entry_source: str = "standard_breakout"
     entry_lane: str = "none"
+    same_day_priority_score: float | None = None
+    industry_a_plus_candidate: bool = False
 
 
 def _coerce_row(row: Mapping[str, Any] | pd.Series | Any) -> dict[str, Any]:
@@ -203,6 +211,9 @@ def select_breakout_candidates(
 
     sort_cols: list[str] = []
     ascending: list[bool] = []
+    if "same_day_priority_score" in work.columns:
+        sort_cols.append("same_day_priority_score")
+        ascending.append(False)
     if "entry_priority_bucket" in work.columns:
         sort_cols.append("entry_priority_bucket")
         ascending.append(True)
@@ -293,6 +304,12 @@ def build_position_state_from_signal(
         entry_bar_time=None if pd.isna(trigger_time) else trigger_time,
         entry_source=str(item.get("entry_source", "standard_breakout")),
         entry_lane=str(item.get("entry_lane", "none")),
+        same_day_priority_score=(
+            float(pd.to_numeric(item.get("same_day_priority_score"), errors="coerce"))
+            if pd.notna(pd.to_numeric(item.get("same_day_priority_score"), errors="coerce"))
+            else None
+        ),
+        industry_a_plus_candidate=bool(item.get("industry_a_plus_candidate", False)),
     )
 
 
@@ -453,6 +470,13 @@ def signals_from_report(report: pd.DataFrame) -> pd.DataFrame:
         "entry_stop_policy",
         "entry_priority_bucket",
         "priority_score_within_source",
+        "same_day_priority_score",
+        "industry_a_plus_candidate",
+        "priority_leader98",
+        "priority_volume_thrust",
+        "priority_move_thrust",
+        "priority_industry_rs",
+        "priority_setup_sweet",
         "leader_score",
         "rs_rating",
     ]
