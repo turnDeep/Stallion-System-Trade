@@ -58,11 +58,11 @@ docker compose up -d --build
 | `breakout_signal_engine.py` | daily breakout scoring engine |
 | `breakout_signal_report.py` | setup/breakout reporting and golden-rule filtering |
 | `qullamaggie_breakout_backtest.py` | swing backtest and exit engine |
-| `stallion/nightly_pipeline.py` | nightly refresh, repair fetch, signal report generation |
-| `stallion/live_trader.py` | live polling, entries, hard stops, end-of-day exit checks |
-| `stallion/breakout_bridge.py` | glue layer between signals, sizing, exits, and backtests |
-| `stallion/storage.py` | SQLite + Parquet operational store |
-| `stallion/fmp.py` | FMP universe download and yfinance bar retrieval |
+| `core/nightly_pipeline.py` | nightly refresh, repair fetch, signal report generation |
+| `core/live_trader.py` | live polling, entries, hard stops, end-of-day exit checks |
+| `core/breakout_bridge.py` | glue layer between signals, sizing, exits, and backtests |
+| `core/storage.py` | SQLite + Parquet operational store |
+| `core/fmp.py` | FMP universe download and yfinance bar retrieval |
 
 ## Notes
 

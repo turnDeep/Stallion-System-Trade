@@ -39,7 +39,7 @@ def emit_alert(
             level=level.upper(),
         )
 
-    webhook_url = os.getenv("STALLION_ALERT_WEBHOOK_URL", "").strip()
+    webhook_url = os.getenv("CORE_ALERT_WEBHOOK_URL", "").strip()
     if not webhook_url:
         return
     try:

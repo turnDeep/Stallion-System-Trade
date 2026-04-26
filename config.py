@@ -1,2 +1,2 @@
-from stallion.config import CostConfig, Credentials, RuntimeConfig, Settings, load_settings
+from core.config import CostConfig, Credentials, RuntimeConfig, Settings, load_settings
 

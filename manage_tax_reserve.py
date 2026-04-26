@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 
-from stallion.config import load_settings
-from stallion.live_trader import _load_tax_reserve_state, _save_tax_reserve_state
-from stallion.storage import SQLiteParquetStore
+from core.config import load_settings
+from core.live_trader import _load_tax_reserve_state, _save_tax_reserve_state
+from core.storage import SQLiteParquetStore
 
 
 def _print_state(state: dict[str, object]) -> None:

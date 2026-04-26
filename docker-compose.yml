@@ -12,10 +12,10 @@ services:
     env_file:
       - .env
     volumes:
-      - stallion-data:/app/data
-      - stallion-reports:/app/reports
+      - core-data:/app/data
+      - core-reports:/app/reports
     healthcheck:
-      test: ["CMD", "python", "-m", "stallion.watchdog"]
+      test: ["CMD", "python", "-m", "core.watchdog"]
       interval: 60s
       timeout: 15s
       retries: 3
@@ -23,5 +23,5 @@ services:
     command: python master_scheduler.py
 
 volumes:
-  stallion-data:
-  stallion-reports:
+  core-data:
+  core-reports:

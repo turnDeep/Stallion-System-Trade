@@ -59,15 +59,15 @@ def _flatten_intraday_history(path: Path) -> pd.DataFrame:
 
 
 def _load_backtest_pickles() -> tuple[pd.DataFrame, pd.DataFrame] | None:
-    daily_pickle = os.getenv("STALLION_BACKTEST_DAILY_PICKLE", "").strip()
-    intraday_pickle = os.getenv("STALLION_BACKTEST_INTRADAY_PICKLE", "").strip()
+    daily_pickle = os.getenv("CORE_BACKTEST_DAILY_PICKLE", "").strip()
+    intraday_pickle = os.getenv("CORE_BACKTEST_INTRADAY_PICKLE", "").strip()
     if not daily_pickle or not intraday_pickle:
         return None
 
     daily_path = Path(daily_pickle)
     intraday_path = Path(intraday_pickle)
     if not daily_path.exists() or not intraday_path.exists():
-        raise FileNotFoundError("STALLION_BACKTEST_DAILY_PICKLE / STALLION_BACKTEST_INTRADAY_PICKLE paths must exist")
+        raise FileNotFoundError("CORE_BACKTEST_DAILY_PICKLE / CORE_BACKTEST_INTRADAY_PICKLE paths must exist")
 
     daily = _flatten_daily_history(daily_path)
     intraday = _flatten_intraday_history(intraday_path)
@@ -77,13 +77,13 @@ def _load_backtest_pickles() -> tuple[pd.DataFrame, pd.DataFrame] | None:
 def run_backtest_report() -> Path:
     settings = load_settings()
     store = SQLiteParquetStore(settings)
-    signals_parquet = os.getenv("STALLION_BACKTEST_SIGNALS_PARQUET", "").strip()
-    daily_parquet = os.getenv("STALLION_BACKTEST_DAILY_PARQUET", "").strip()
-    intraday_parquet = os.getenv("STALLION_BACKTEST_INTRADAY_PARQUET", "").strip()
+    signals_parquet = os.getenv("CORE_BACKTEST_SIGNALS_PARQUET", "").strip()
+    daily_parquet = os.getenv("CORE_BACKTEST_DAILY_PARQUET", "").strip()
+    intraday_parquet = os.getenv("CORE_BACKTEST_INTRADAY_PARQUET", "").strip()
     direct_inputs = _load_backtest_pickles()
     if signals_parquet:
         if not daily_parquet or not intraday_parquet:
-            raise ValueError("STALLION_BACKTEST_DAILY_PARQUET and STALLION_BACKTEST_INTRADAY_PARQUET are required with STALLION_BACKTEST_SIGNALS_PARQUET.")
+            raise ValueError("CORE_BACKTEST_DAILY_PARQUET and CORE_BACKTEST_INTRADAY_PARQUET are required with CORE_BACKTEST_SIGNALS_PARQUET.")
         LOGGER.info("Running breakout backtest from prepared signal inputs")
         daily_bars = pd.read_parquet(daily_parquet)
         intraday_bars = pd.read_parquet(intraday_parquet)
@@ -97,7 +97,7 @@ def run_backtest_report() -> Path:
             intraday_bars = store.load_bars("5m")
         signals = None
     if daily_bars.empty or intraday_bars.empty:
-        raise RuntimeError("No local 1d/5m history available. Run the nightly pipeline first or set STALLION_BACKTEST_* environment variables.")
+        raise RuntimeError("No local 1d/5m history available. Run the nightly pipeline first or set CORE_BACKTEST_* environment variables.")
 
     cfg = BreakoutConfig.from_settings(settings)
     daily_bars = daily_bars.loc[daily_bars["symbol"].ne("SPY")].copy() if "symbol" in daily_bars.columns else daily_bars

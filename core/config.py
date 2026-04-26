@@ -117,10 +117,20 @@ def _build_paths(root_dir: Path) -> PathsConfig:
     artifacts_dir = data_dir / "artifacts"
     model_dir = artifacts_dir / "models"
     reports_dir = root_dir / "reports"
+    sqlite_path = data_dir / "core_live.sqlite"
+    if not sqlite_path.exists() and data_dir.exists():
+        legacy_candidates = sorted(path for path in data_dir.glob("*_live.sqlite") if path.name != sqlite_path.name)
+        if len(legacy_candidates) == 1:
+            legacy_path = legacy_candidates[0]
+            legacy_path.replace(sqlite_path)
+            for suffix in ("-wal", "-shm"):
+                sidecar = Path(f"{legacy_path}{suffix}")
+                if sidecar.exists():
+                    sidecar.replace(Path(f"{sqlite_path}{suffix}"))
     return PathsConfig(
         root_dir=root_dir,
         data_dir=data_dir,
-        sqlite_path=data_dir / "stallion_live.sqlite",
+        sqlite_path=sqlite_path,
         parquet_dir=parquet_dir,
         artifacts_dir=artifacts_dir,
         model_dir=model_dir,
