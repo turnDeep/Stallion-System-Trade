@@ -1,9 +1,10 @@
-#!/usr/bin/env python3
+﻿#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import json
 import math
+import sys
 import time
 from pathlib import Path
 from typing import Iterable
@@ -11,24 +12,28 @@ from typing import Iterable
 import numpy as np
 import pandas as pd
 
-from breakout_signal_engine import compute_breakout_scores_with_diag
-from breakout_signal_report import (
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from signals.breakout_signal_engine import compute_breakout_scores_with_diag
+from signals.breakout_signal_report import (
     DEFAULT_CALIBRATED_PARAMS,
     _compute_intraday_first_breakouts as _compute_standard_first_breakouts,
 )
-from zigzag_breakout_engine import (
+from signals.zigzag_breakout_engine import (
     ZigZagBreakoutConfig,
     _compute_intraday_first_breakouts as _compute_zigzag_first_breakouts,
     compute_zigzag_breakout_scores,
 )
-from zigzag_entry_engine import ZigZagEntryConfig, apply_zigzag_entry_engine
+from signals.zigzag_entry_engine import ZigZagEntryConfig, apply_zigzag_entry_engine
 
 
-ROOT = Path(__file__).resolve().parent
-ANALYSIS_ROOT = ROOT.parent / "analysis_outputs"
+ANALYSIS_ROOT = REPO_ROOT / "analysis_outputs"
 FULL_DATASET_DIR = ANALYSIS_ROOT / "russell3000_full_dataset"
 DAILY_10Y_DIR = ANALYSIS_ROOT / "russell3000_daily_10y_dataset"
 OUT_DIR = ANALYSIS_ROOT / "two_lane_calibration"
+CONFIGS_DIR = REPO_ROOT / "configs"
 SESSION_TZ = "America/New_York"
 
 
@@ -531,8 +536,9 @@ def run(force: bool = False) -> None:
     tight_best = _select_best(tight_sweep, min_count=100, min_leader=standard_leader_floor)
 
     calibrated = _build_calibrated_json(std_best, tight_best)
+    CONFIGS_DIR.mkdir(parents=True, exist_ok=True)
     (OUT_DIR / "calibrated_params.json").write_text(json.dumps(calibrated, indent=2), encoding="utf-8")
-    (ROOT / "calibrated_params.json").write_text(json.dumps(calibrated, indent=2), encoding="utf-8")
+    (CONFIGS_DIR / "calibrated_params.json").write_text(json.dumps(calibrated, indent=2), encoding="utf-8")
 
     quantile_report = {
         "standard_quantile_params": _quantile_params(std_events),
@@ -549,7 +555,7 @@ def run(force: bool = False) -> None:
         _log(f"Best standard: {std_best.to_dict()}")
     if tight_best is not None:
         _log(f"Best tight: {tight_best.to_dict()}")
-    _log(f"Wrote {ROOT / 'calibrated_params.json'}")
+    _log(f"Wrote {CONFIGS_DIR / 'calibrated_params.json'}")
 
 
 def parse_args() -> argparse.Namespace:

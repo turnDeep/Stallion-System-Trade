@@ -7,12 +7,12 @@ from typing import Any, Mapping
 import numpy as np
 import pandas as pd
 
-from qullamaggie_breakout_backtest import (
+from backtesting.qullamaggie_breakout_backtest import (
     BacktestConfig as ExitBacktestConfig,
     prepare_daily as _prepare_exit_daily,
     run_backtest as _run_breakout_backtest,
 )
-from breakout_signal_report import build_breakout_signal_report as _build_breakout_signal_report
+from signals.breakout_signal_report import build_breakout_signal_report as _build_breakout_signal_report
 
 
 @dataclass(frozen=True)
@@ -254,7 +254,7 @@ def build_position_state_from_signal(
         if gap_pct >= cfg.ep_gap_exclusion_pct:
             return None
 
-    # ZigZag 用の effective_pivot_level があればそれを使う
+    # ZigZag 用の effective_pivot_level があれ�Eそれを使ぁE
     pivot_level = pd.to_numeric(item.get("effective_pivot_level", item.get("pivot_high")), errors="coerce")
     breakout_day_low = pd.to_numeric(item.get("low"), errors="coerce")
     if not np.isfinite(pivot_level) or not np.isfinite(breakout_day_low):
@@ -270,7 +270,7 @@ def build_position_state_from_signal(
     if not np.isfinite(risk_per_share) or risk_per_share <= 0:
         return None
 
-    # stop limit (ATR/ADR) チェック。zigzag 側で無視指定があればスキップ
+    # stop limit (ATR/ADR) チェチE��、Eigzag 側で無視指定があればスキチE�E
     entry_stop_policy = str(item.get("entry_stop_policy", "respect_stop_limit"))
     if entry_stop_policy == "respect_stop_limit":
         atr20 = pd.to_numeric(item.get("atr20"), errors="coerce")
@@ -356,7 +356,7 @@ def evaluate_exit_action(
             "reduced_on_dma21": state.reduced_on_dma21,
         }
 
-    # Partial TP は 1回だけ。高値到達で判定。
+    # Partial TP は 1回だけ。高値到達で判定、E
     if not state.partial_profit_taken and state.shares > 0:
         tp_price_r = state.entry_price + cfg.tp_partial_r * state.initial_risk_per_share
         tp_price_pct = state.entry_price * (1.0 + cfg.tp_partial_pct)
@@ -373,7 +373,7 @@ def evaluate_exit_action(
                 "reduced_on_dma21": state.reduced_on_dma21,
             }
 
-    # 21DMA: small runner に縮小 -> さらに悪化で final exit
+    # 21DMA: small runner に縮封E-> さらに悪化で final exit
     if pd.notna(dma21) and close_price < float(dma21) and state.shares > 0:
         if cfg.use_dma21_tight_low_volume_grace and tight_low_volume and not state.pending_dma21_grace:
             return {

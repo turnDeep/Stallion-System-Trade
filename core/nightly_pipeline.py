@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -10,7 +10,7 @@ from .breakout_bridge import BreakoutConfig, build_breakout_signal_report
 from .config import Settings, load_settings
 from .fmp import FMPClient, download_yfinance_bars
 from .storage import SQLiteParquetStore
-from industry_priority import add_industry_composite_priority
+from signals.industry_priority import add_industry_composite_priority
 
 
 LOGGER = logging.getLogger(__name__)
@@ -20,8 +20,8 @@ def _build_daily_summary(report: pd.DataFrame) -> pd.DataFrame:
     if report.empty:
         return pd.DataFrame()
     
-    # breakout_signal_report.py 側の summary を優先
-    # が、念の為ここでも集計ロジックを更新
+    # Prefer the summary produced by the signal report, but keep this
+    # aggregation here as a safe fallback for generated reports.
     return (
         report.groupby("date", as_index=False)
         .agg(
@@ -220,7 +220,7 @@ def run_nightly_pipeline(settings: Settings | None = None) -> dict[str, Path]:
 
     latest_date = pd.to_datetime(report["date"]).max().normalize() if not report.empty else pd.Timestamp.utcnow().normalize()
     
-    # shortlist 生成: セットアップ候補 or 当日組シグナル発生銘柄
+    # shortlist 逕滓・: 繧ｻ繝・ヨ繧｢繝・・蛟呵｣・or 蠖捺律邨・す繧ｰ繝翫Ν逋ｺ逕滄釜譟・
     shortlist_pool = report.loc[report["date"].eq(latest_date)].copy()
     mask = shortlist_pool["setup_candidate"].fillna(False) | shortlist_pool["breakout_signal"].fillna(False)
     

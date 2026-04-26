@@ -1,4 +1,4 @@
-# Auto-Swing-Trade-Bot
+﻿# Auto-Swing-Trade-Bot
 
 English | [日本語](./README.ja.md)
 
@@ -21,25 +21,31 @@ Auto-Swing-Trade-Bot is a Qullamaggie-style breakout swing trading system for U.
 Nightly breakout pipeline:
 
 ```bash
-python nightly_breakout_pipeline.py
+python scripts/nightly_pipeline.py
 ```
 
 Live trader:
 
 ```bash
-python breakout_live_trader.py
+python scripts/live_trader.py
 ```
 
 Scheduler:
 
 ```bash
-python master_scheduler.py
+python scripts/scheduler.py
 ```
 
 Backtester:
 
 ```bash
-python backtester.py
+python scripts/backtest.py
+```
+
+Tax reserve manager:
+
+```bash
+python scripts/manage_tax_reserve.py show
 ```
 
 Docker:
@@ -48,24 +54,22 @@ Docker:
 docker compose up -d --build
 ```
 
-## Main Files
+## Directory Layout
 
-| File | Role |
+| Directory | Role |
 |---|---|
-| `nightly_breakout_pipeline.py` | top-level nightly pipeline entrypoint |
-| `breakout_live_trader.py` | top-level live trader entrypoint |
-| `master_scheduler.py` | scheduler and bootstrap loop |
-| `breakout_signal_engine.py` | daily breakout scoring engine |
-| `breakout_signal_report.py` | setup/breakout reporting and golden-rule filtering |
-| `qullamaggie_breakout_backtest.py` | swing backtest and exit engine |
-| `core/nightly_pipeline.py` | nightly refresh, repair fetch, signal report generation |
-| `core/live_trader.py` | live polling, entries, hard stops, end-of-day exit checks |
-| `core/breakout_bridge.py` | glue layer between signals, sizing, exits, and backtests |
-| `core/storage.py` | SQLite + Parquet operational store |
-| `core/fmp.py` | FMP universe download and yfinance bar retrieval |
+| `core/` | production runtime: storage, broker, scheduler-facing pipelines, live trader, watchdog |
+| `signals/` | standard breakout, zigzag breakout, entry lane, and industry-priority signal engines |
+| `backtesting/` | reusable swing backtest and portfolio validation code |
+| `research/` | calibration and exploratory analysis scripts |
+| `scripts/` | CLI entrypoints used by operators, Docker, and the scheduler |
+| `configs/` | calibrated strategy parameters |
 
 ## Notes
 
+- Root-level thin wrappers were removed; use `scripts/` commands instead.
+- The old duplicated `backtester.py` entrypoint is now `scripts/backtest.py`; the implementation remains in `core/backtester.py`.
+- A stale legacy `optimizer.py` was removed because it referenced a non-existent `run_backtest` export and was not used by the current swing breakout system.
 - The system no longer uses the old 60-day ML pipeline naming, threshold-based classifiers, or same-day flatten logic.
 - 5-minute data from Yahoo remains source-limited, so the repository keeps appending and auditing local history over time.
 - Demo mode is used automatically when the required live broker credentials are not present.
