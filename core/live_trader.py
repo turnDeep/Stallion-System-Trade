@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import logging
@@ -25,7 +25,7 @@ from .discord_notifier import DiscordNotifier
 from .fmp import FMPClient
 from .notifier import emit_alert
 from .storage import SQLiteParquetStore
-from industry_priority import add_industry_composite_priority, choose_replacement_index, is_a_plus_candidate
+from signals.industry_priority import add_industry_composite_priority, choose_replacement_index, is_a_plus_candidate
 
 
 LOGGER = logging.getLogger(__name__)
@@ -121,9 +121,9 @@ def _reserve_tax_if_profitable(
 
     total_reserved_tax = float(state["reserved_tax_usd"])
     notifier.notify(
-        "税金用ドル保持アラート",
+        "Tax Reserve Alert",
         [
-            f"利益が ${profit_usd:.2f} USD 出たため、${tax_usd:.2f} USD 保持しました。",
+            f"Profit of ${profit_usd:.2f} USD was realized, so ${tax_usd:.2f} USD was reserved for tax.",
             f"- symbol: {symbol}",
             f"- reason: {reason}",
             f"- shares: {shares}",
@@ -131,7 +131,7 @@ def _reserve_tax_if_profitable(
             f"- exit: ${exit_price:.2f}",
             f"- tax_rate: {TAX_RATE:.3%}",
             f"- total_reserved_tax_usd: ${total_reserved_tax:.2f}",
-            "- Webullでは円貨で税金が引かれるため、必要に応じて手動で USD を JPY に為替取引してください。",
+            "- Webull charges Japanese tax in JPY; manually convert the reserved USD to JPY when needed.",
         ],
         level="WARNING",
     )
@@ -158,14 +158,14 @@ def _load_monitor_symbols(
     *,
     extra_symbols: list[str] | None = None,
 ) -> list[str]:
-    """shortlist ∪ extra_symbols (open positions) で監視対象を構築する。"""
+    """Build monitor symbols from the shortlist plus currently open positions."""
     shortlist = store.load_shortlist(session_date)
     if shortlist.empty:
         shortlist = store.load_shortlist()
     shortlist = shortlist.head(settings.runtime.monitor_count).copy()
     base = set(shortlist["symbol"].dropna().astype(str).str.upper().tolist())
 
-    # 持ち越し建玉を必ず含める（shortlistに入っていなくても EOD exit が正しく動くよう）
+    # Always monitor open positions so hard stops and EOD exits still run.
     if extra_symbols:
         for sym in extra_symbols:
             sym_upper = str(sym).strip().upper()
@@ -522,7 +522,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
     notifier.notify("BOT STARTUP", [f"- mode: {settings.trade_mode}", "- strategy: qullamaggie_breakout"])
 
     today = _today_ny(settings)
-    # 持ち越し建玉を shortlist に優先マージして監視対象を確定する
+    # 謖√■雜翫＠蟒ｺ邇峨ｒ shortlist 縺ｫ蜆ｪ蜈医・繝ｼ繧ｸ縺励※逶｣隕門ｯｾ雎｡繧堤｢ｺ螳壹☆繧・
     open_positions_at_start = _open_positions_frame(store)
     carried_symbols = (
         open_positions_at_start["symbol"].dropna().astype(str).str.upper().tolist()

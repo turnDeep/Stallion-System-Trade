@@ -3,13 +3,18 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+import sys
 from typing import Any
 
 import numpy as np
 import pandas as pd
 
-from industry_priority import add_industry_composite_priority, choose_replacement_index, sort_by_industry_priority
-from qullamaggie_breakout_backtest import prepare_daily
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
+
+from signals.industry_priority import add_industry_composite_priority, choose_replacement_index, sort_by_industry_priority
+from backtesting.qullamaggie_breakout_backtest import prepare_daily
 
 
 INITIAL_EQUITY = 100_000.0

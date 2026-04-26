@@ -20,7 +20,7 @@ services:
       timeout: 15s
       retries: 3
       start_period: 900s
-    command: python master_scheduler.py
+    command: python scripts/scheduler.py
 
 volumes:
   core-data:

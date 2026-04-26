@@ -1,10 +1,15 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 from dataclasses import replace
 from pathlib import Path
+import sys
 from typing import Callable
 
 import pandas as pd
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 from core.breakout_bridge import (
     BreakoutConfig,
@@ -15,8 +20,7 @@ from core.config import load_settings
 from core.storage import SQLiteParquetStore
 
 
-ROOT = Path(__file__).resolve().parent
-REPORTS_DIR = ROOT / "reports"
+REPORTS_DIR = REPO_ROOT / "reports"
 SIGNAL_REPORT_PATH = REPORTS_DIR / "breakout_signal_report.parquet"
 SUMMARY_PATH = REPORTS_DIR / "fresh_variant_summary.csv"
 REASON_PATH = REPORTS_DIR / "fresh_variant_exit_reason_summary.csv"
@@ -24,7 +28,7 @@ MARKDOWN_PATH = REPORTS_DIR / "fresh_variant_report.md"
 
 
 def _load_inputs() -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, BreakoutConfig]:
-    settings = load_settings(ROOT)
+    settings = load_settings(REPO_ROOT)
     store = SQLiteParquetStore(settings)
     daily = store.load_bars("1d")
     intraday = store.load_bars("5m")

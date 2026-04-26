@@ -1,4 +1,4 @@
-import datetime
+﻿import datetime
 import logging
 import os
 import sqlite3
@@ -8,6 +8,10 @@ import time
 import traceback
 from dataclasses import dataclass
 from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+    sys.path.insert(0, str(REPO_ROOT))
 
 import pandas as pd
 import pytz
@@ -19,7 +23,7 @@ from core.storage import SQLiteParquetStore
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+SCRIPT_DIR = str(REPO_ROOT)
 MODEL_FILENAME = "hist_gbm_extended_5m_start.pkl"
 STORE = None
 NOTIFIER = None
@@ -145,9 +149,10 @@ def _notify_detailed_failure(title: str, exc: Exception, *, component: str, scri
 
 def run_python_script(script_name: str) -> None:
     logger.info("Running script: %s", script_name)
+    script_path = REPO_ROOT / script_name
     try:
         subprocess.run(
-            [sys.executable, script_name],
+            [sys.executable, str(script_path)],
             check=True,
             cwd=SCRIPT_DIR,
             capture_output=True,
@@ -171,12 +176,12 @@ def run_daily_ml_pipeline() -> None:
     if NOTIFIER is not None:
         NOTIFIER.notify("NIGHTLY PIPELINE START", ["- job: nightly_pipeline"])
     try:
-        run_python_script("nightly_breakout_pipeline.py")
+        run_python_script("scripts/nightly_pipeline.py")
         logger.info("Nightly breakout pipeline completed successfully. Shortlist and reports updated.")
         if NOTIFIER is not None:
             NOTIFIER.notify("NIGHTLY PIPELINE COMPLETE", ["- status: success"])
     except Exception as exc:
-        _notify_detailed_failure("NIGHTLY PIPELINE FAILED", exc, component="master_scheduler", script_name="nightly_breakout_pipeline.py")
+        _notify_detailed_failure("NIGHTLY PIPELINE FAILED", exc, component="master_scheduler", script_name="scripts/nightly_pipeline.py")
 
 
 def run_daily_trading_bot() -> None:
@@ -191,9 +196,9 @@ def run_daily_trading_bot() -> None:
         return
 
     try:
-        run_python_script("breakout_live_trader.py")
+        run_python_script("scripts/live_trader.py")
     except Exception as exc:
-        _notify_detailed_failure("LIVE TRADER FAILED", exc, component="master_scheduler", script_name="breakout_live_trader.py")
+        _notify_detailed_failure("LIVE TRADER FAILED", exc, component="master_scheduler", script_name="scripts/live_trader.py")
 
 
 def _sqlite_table_has_rows(sqlite_path: Path, table_name: str) -> bool:

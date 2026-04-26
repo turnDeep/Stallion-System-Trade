@@ -13,4 +13,4 @@ RUN pip install --no-cache-dir schedule webull-python-sdk-core webull-python-sdk
 
 COPY . .
 
-CMD ["python", "-u", "master_scheduler.py"]
+CMD ["python", "-u", "scripts/scheduler.py"]

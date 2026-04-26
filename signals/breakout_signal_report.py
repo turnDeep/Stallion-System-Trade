@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 from pathlib import Path
@@ -6,24 +6,25 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from breakout_signal_engine import compute_breakout_scores_with_diag
-from zigzag_breakout_engine import (
+from signals.breakout_signal_engine import compute_breakout_scores_with_diag
+from signals.zigzag_breakout_engine import (
     ZigZagBreakoutConfig,
     _normalize_daily_input as _normalize_zigzag_daily_input,
     _normalize_intraday_input as _normalize_zigzag_intraday_input,
     compute_zigzag_breakout_scores,
     finalize_zigzag_breakout_signal_report,
 )
-from zigzag_entry_engine import ZigZagEntryConfig, apply_zigzag_entry_engine
+from signals.zigzag_entry_engine import ZigZagEntryConfig, apply_zigzag_entry_engine
 
 
-ROOT = Path(__file__).resolve().parent
-DAILY_PATH = ROOT / "analysis_outputs" / "russell3000_full_dataset" / "daily_history.pkl"
-INTRADAY_PATH = ROOT / "analysis_outputs" / "russell3000_full_dataset" / "intraday_5m_history.pkl"
-OUT_DIR = ROOT / "analysis_outputs" / "v4_rs_percentile_breakout_report"
+PACKAGE_DIR = Path(__file__).resolve().parent
+REPO_ROOT = PACKAGE_DIR.parent
+DAILY_PATH = REPO_ROOT / "analysis_outputs" / "russell3000_full_dataset" / "daily_history.pkl"
+INTRADAY_PATH = REPO_ROOT / "analysis_outputs" / "russell3000_full_dataset" / "intraday_5m_history.pkl"
+OUT_DIR = REPO_ROOT / "analysis_outputs" / "v4_rs_percentile_breakout_report"
 SESSION_TZ = "America/New_York"
 DAILY_LOOKBACK_CALENDAR_DAYS = 450
-CALIBRATED_PARAMS_PATH = ROOT / "calibrated_params.json"
+CALIBRATED_PARAMS_PATH = REPO_ROOT / "configs" / "calibrated_params.json"
 
 DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
     "daily_calibration": {
@@ -648,7 +649,7 @@ def _merge_standard_and_zigzag_reports(
     std = standard_report.copy()
     zz = zigzag_report.copy()
 
-    # standard 側
+    # standard 蛛ｴ
     std["standard_breakout_signal"] = std["breakout_signal"].fillna(False).astype(bool)
     std["zigzag_breakout_signal"] = False
     std["entry_source"] = np.where(std["standard_breakout_signal"], "standard_breakout", "none")
@@ -657,11 +658,11 @@ def _merge_standard_and_zigzag_reports(
     std["same_day_priority_score"] = np.nan
     std["effective_pivot_level"] = pd.to_numeric(std["pivot_high"], errors="coerce")
 
-    # zigzag 側
+    # zigzag 蛛ｴ
     zz["standard_breakout_signal"] = False
     zz["effective_pivot_level"] = pd.to_numeric(zz["zigzag_line_value"], errors="coerce")
 
-    # 共通 schema へ寄せる
+    # 蜈ｱ騾・schema 縺ｸ蟇・○繧・
     std_keep = [
         "symbol", "date", "open", "high", "low", "close", "volume",
         "prev_close", "atr20", "adr20_pct",
@@ -693,8 +694,8 @@ def _merge_standard_and_zigzag_reports(
     std = std[[c for c in std_keep if c in std.columns]].copy()
     zz = zz[[c for c in zz_keep if c in zz.columns]].copy()
 
-    # 同一symbol/dateで standard と zigzag を別行として保持すると、
-    # 後段の entry 優先順位付けが素直になる
+    # 蜷御ｸsymbol/date縺ｧ standard 縺ｨ zigzag 繧貞挨陦後→縺励※菫晄戟縺吶ｋ縺ｨ縲・
+    # 蠕梧ｮｵ縺ｮ entry 蜆ｪ蜈磯・ｽ堺ｻ倥￠縺檎ｴ逶ｴ縺ｫ縺ｪ繧・
     report = pd.concat([std, zz], ignore_index=True, sort=False)
 
     report["standard_breakout_signal"] = report["standard_breakout_signal"].fillna(False).astype(bool)
@@ -778,17 +779,17 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
     daily_df = _prepare_daily_universe(session_min=session_min, session_max=session_max)
     print(f"Daily universe rows: {len(daily_df):,}")
 
-    # standard 側候補日
+    # standard 蛛ｴ蛟呵｣懈律
     standard_daily_scored = compute_breakout_scores_with_diag(daily_df)
     standard_setup_candidates = _prepare_setup_candidates(standard_daily_scored, session_min, session_max)
 
-    # zigzag 側候補日
+    # zigzag 蛛ｴ蛟呵｣懈律
     zig_cfg = ZigZagBreakoutConfig()
     zig_daily = _normalize_zigzag_daily_input(daily_df.copy())
     zig_daily_scored = compute_zigzag_breakout_scores(zig_daily, cfg=zig_cfg)
     zig_setup_candidates = zig_daily_scored.loc[zig_daily_scored["setup_candidate"]].copy()
 
-    # union の candidate map を作る
+    # union 縺ｮ candidate map 繧剃ｽ懊ｋ
     candidate_dates_by_symbol: dict[str, set[pd.Timestamp]] = {}
 
     for source_df in [standard_setup_candidates, zig_setup_candidates]:

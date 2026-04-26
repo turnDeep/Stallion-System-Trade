@@ -7,7 +7,7 @@ import numpy as np
 import pandas as pd
 from scipy.signal import argrelextrema
 
-from breakout_signal_engine import compute_breakout_scores_with_diag
+from signals.breakout_signal_engine import compute_breakout_scores_with_diag
 
 
 SESSION_TZ = "America/New_York"
