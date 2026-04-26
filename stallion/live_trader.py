@@ -25,6 +25,7 @@ from .discord_notifier import DiscordNotifier
 from .fmp import FMPClient
 from .notifier import emit_alert
 from .storage import SQLiteParquetStore
+from industry_priority import add_industry_composite_priority, choose_replacement_index, is_a_plus_candidate
 
 
 LOGGER = logging.getLogger(__name__)
@@ -174,6 +175,8 @@ def _position_state_from_row(row: dict[str, Any]) -> BreakoutPositionState | Non
         reduced_on_dma21=bool(payload.get("reduced_on_dma21", False)),
         entry_source=str(payload.get("entry_source", "standard_breakout")),
         entry_lane=str(payload.get("entry_lane", "none")),
+        same_day_priority_score=pd.to_numeric(payload.get("same_day_priority_score"), errors="coerce"),
+        industry_a_plus_candidate=bool(payload.get("industry_a_plus_candidate", False)),
     )
 
 
@@ -215,6 +218,8 @@ def _upsert_demo_position(
                         "reduced_on_dma21": state.reduced_on_dma21,
                         "entry_source": state.entry_source,
                         "entry_lane": state.entry_lane,
+                        "same_day_priority_score": state.same_day_priority_score,
+                        "industry_a_plus_candidate": state.industry_a_plus_candidate,
                     },
                     ensure_ascii=True,
                 ),
@@ -222,6 +227,42 @@ def _upsert_demo_position(
             }
         )
     _replace_position_rows(store, remaining)
+
+
+def _priority_position_summaries(
+    positions: pd.DataFrame,
+    latest_quotes: pd.DataFrame,
+) -> list[dict[str, Any]]:
+    if positions.empty:
+        return []
+    quote_map = {}
+    if latest_quotes is not None and not latest_quotes.empty:
+        quote_map = {
+            str(row.symbol).upper(): float(row.price)
+            for row in latest_quotes.itertuples(index=False)
+            if pd.notna(getattr(row, "price", None))
+        }
+
+    summaries: list[dict[str, Any]] = []
+    for idx, row in enumerate(positions.to_dict(orient="records")):
+        payload = _payload_dict(row.get("payload_json"))
+        symbol = str(row.get("symbol") or "").upper()
+        entry_price = float(payload.get("entry_price") or row.get("avg_price") or 0.0)
+        last_price = quote_map.get(symbol, entry_price)
+        current_gain = (last_price / entry_price - 1.0) if entry_price > 0 else 0.0
+        summaries.append(
+            {
+                "index": idx,
+                "symbol": symbol,
+                "row": row,
+                "quantity": int(row.get("quantity") or 0),
+                "last_price": float(last_price),
+                "current_gain": float(current_gain),
+                "priority_score": float(payload.get("same_day_priority_score") or payload.get("priority_score_within_source") or 0.0),
+                "a_plus_candidate": bool(payload.get("industry_a_plus_candidate", False)),
+            }
+        )
+    return summaries
 
 
 def _submit_order(
@@ -539,14 +580,19 @@ def run_live_trader(settings: Settings | None = None) -> None:
             continue
 
         open_positions = _open_positions_frame(store)
-        if len(open_positions) >= cfg.max_positions:
-            time.sleep(settings.runtime.quote_poll_seconds)
-            continue
-
         daily_bars = store.load_bars("1d", symbols=symbols)
         intraday_bars = store.load_bars("5m", symbols=symbols)
         signal_report = build_breakout_signal_report(daily_bars, intraday_bars, cfg=cfg)
-        selected = select_breakout_candidates(signal_report, session_date=today, max_positions=cfg.max_positions)
+        if cfg.use_industry_composite_priority:
+            try:
+                full_daily_for_priority = store.load_bars("1d")
+                signal_report = add_industry_composite_priority(signal_report, full_daily_for_priority, store.load_universe())
+            except Exception as exc:
+                LOGGER.warning("Industry composite priority unavailable; using base ranking. error=%s", exc)
+        selection_limit = cfg.max_positions
+        if cfg.enable_a_plus_replacement:
+            selection_limit = max(cfg.max_positions * 3, cfg.max_positions)
+        selected = select_breakout_candidates(signal_report, session_date=today, max_positions=selection_limit)
         if selected.empty:
             time.sleep(settings.runtime.quote_poll_seconds)
             continue
@@ -572,9 +618,69 @@ def run_live_trader(settings: Settings | None = None) -> None:
         current_buying_power = broker.get_account_buying_power()
         held_symbols = set(open_positions["symbol"].tolist())
         for row in selected.itertuples(index=False):
-            if len(held_symbols) >= cfg.max_positions:
-                break
             if row.symbol in held_symbols:
+                continue
+
+            desired_slot_cash = float(opening_buying_power) * cfg.max_alloc_pct_per_trade
+            precheck_state = build_position_state_from_signal(
+                row,
+                equity=opening_buying_power,
+                cash=max(float(current_buying_power), desired_slot_cash),
+                cfg=cfg,
+            )
+            if precheck_state is None:
+                continue
+            needs_replacement = len(held_symbols) >= cfg.max_positions or current_buying_power < desired_slot_cash
+            if needs_replacement and cfg.enable_a_plus_replacement:
+                position_summaries = _priority_position_summaries(_open_positions_frame(store), quote_frame)
+                replace_idx = choose_replacement_index(position_summaries, row)
+                if replace_idx is None:
+                    continue
+                replacement = position_summaries[replace_idx]
+                if replacement["quantity"] <= 0:
+                    continue
+                replacement_payload = _payload_dict(replacement["row"].get("payload_json"))
+                replacement_payload["exit_reason"] = "priority_replacement_exit"
+                submitted_replacement = _submit_order(
+                    store,
+                    broker,
+                    notifier,
+                    session_date=today,
+                    symbol=replacement["symbol"],
+                    side="SELL",
+                    quantity=int(replacement["quantity"]),
+                    price_hint=float(replacement["last_price"]),
+                    payload=replacement_payload,
+                )
+                if submitted_replacement is None:
+                    continue
+                notifier.notify(
+                    "PRIORITY REPLACEMENT SELL",
+                    [
+                        f"- sold: {replacement['symbol']}",
+                        f"- incoming: {row.symbol}",
+                        f"- gain: {replacement['current_gain']:.2%}",
+                        f"- reason: A+ industry composite candidate",
+                    ],
+                    level="WARNING",
+                )
+                _notify_tax_if_profitable(
+                    notifier,
+                    symbol=replacement["symbol"],
+                    entry_price=float(replacement_payload.get("entry_price") or replacement["last_price"]),
+                    exit_price=float(replacement["last_price"]),
+                    shares=int(replacement["quantity"]),
+                    reason="priority_replacement_exit",
+                )
+                remaining_rows = [
+                    p["row"]
+                    for idx, p in enumerate(position_summaries)
+                    if idx != replace_idx
+                ]
+                _replace_position_rows(store, remaining_rows)
+                held_symbols = {str(p.get("symbol") or "").upper() for p in remaining_rows}
+                current_buying_power += float(replacement["last_price"]) * int(replacement["quantity"])
+            elif len(held_symbols) >= cfg.max_positions:
                 continue
 
             state = build_position_state_from_signal(row, equity=opening_buying_power, cash=current_buying_power, cfg=cfg)
@@ -596,6 +702,13 @@ def run_live_trader(settings: Settings | None = None) -> None:
                 "entry_source": getattr(row, "entry_source", "standard_breakout"),
                 "entry_lane": getattr(row, "entry_lane", "none"),
                 "priority_score_within_source": getattr(row, "priority_score_within_source", None),
+                "same_day_priority_score": getattr(row, "same_day_priority_score", None),
+                "industry_a_plus_candidate": bool(is_a_plus_candidate(row)),
+                "priority_leader98": getattr(row, "priority_leader98", None),
+                "priority_volume_thrust": getattr(row, "priority_volume_thrust", None),
+                "priority_move_thrust": getattr(row, "priority_move_thrust", None),
+                "priority_industry_rs": getattr(row, "priority_industry_rs", None),
+                "priority_setup_sweet": getattr(row, "priority_setup_sweet", None),
             }
             submitted = _submit_order(
                 store,
@@ -623,6 +736,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
             if broker.is_demo:
                 _upsert_demo_position(store, state=state, session_date=today)
             held_symbols.add(state.symbol)
+            current_buying_power = max(0.0, current_buying_power - state.shares * state.entry_price)
 
         time.sleep(settings.runtime.quote_poll_seconds)
 
