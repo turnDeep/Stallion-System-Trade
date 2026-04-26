@@ -1,4 +1,4 @@
-from stallion.strategy import (
+from core.strategy import (
     STANDARD_FEATURE_COLUMNS,
     StandardSystemSpec,
     candidate_sort_frame,

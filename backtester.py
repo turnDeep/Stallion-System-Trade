@@ -1,4 +1,4 @@
-from stallion.backtester import main
+from core.backtester import main
 
 
 if __name__ == "__main__":

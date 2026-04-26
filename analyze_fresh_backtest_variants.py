@@ -6,13 +6,13 @@ from typing import Callable
 
 import pandas as pd
 
-from stallion.breakout_bridge import (
+from core.breakout_bridge import (
     BreakoutConfig,
     run_breakout_backtest_from_inputs,
     signals_from_report,
 )
-from stallion.config import load_settings
-from stallion.storage import SQLiteParquetStore
+from core.config import load_settings
+from core.storage import SQLiteParquetStore
 
 
 ROOT = Path(__file__).resolve().parent

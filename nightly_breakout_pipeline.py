@@ -1,4 +1,4 @@
-from stallion.nightly_pipeline import main
+from core.nightly_pipeline import main
 
 
 if __name__ == "__main__":
