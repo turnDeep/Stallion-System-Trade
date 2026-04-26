@@ -28,6 +28,8 @@ CALIBRATED_PARAMS_PATH = ROOT / "calibrated_params.json"
 DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
     "daily_calibration": {
         "leader_min": 89.0,
+        "standard_leader_min": 89.0,
+        "tight_leader_min": 89.0,
         "leader_quantile": 0.85,
         "standard_setup_min": 58.0,
         "tight_setup_min": 57.0,
@@ -101,7 +103,12 @@ def _zigzag_entry_config_from_params(params: dict[str, object]) -> ZigZagEntryCo
     setup_max_value = daily.get("tight_setup_max")
 
     return ZigZagEntryConfig(
-        leader_min=float(daily.get("leader_min", DEFAULT_CALIBRATED_PARAMS["daily_calibration"]["leader_min"])),  # type: ignore[index]
+        leader_min=float(
+            daily.get(
+                "tight_leader_min",
+                daily.get("leader_min", DEFAULT_CALIBRATED_PARAMS["daily_calibration"]["leader_min"]),  # type: ignore[index]
+            )
+        ),
         setup_min=float(daily.get("tight_setup_min", DEFAULT_CALIBRATED_PARAMS["daily_calibration"]["tight_setup_min"])),  # type: ignore[index]
         setup_max=float(setup_max_value) if use_setup_max and setup_max_value is not None else None,
         trigger_min=float(_nested_get(params, "intraday_calibration", "tight_reversal", "trigger_min", 69.0)),
@@ -260,7 +267,14 @@ def _finalize_report(
     first_breakouts: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     params = load_calibrated_params()
-    leader_min = float(_cfg_get(params, "daily_calibration", "leader_min", 89.0))
+    leader_min = float(
+        _cfg_get(
+            params,
+            "daily_calibration",
+            "standard_leader_min",
+            _cfg_get(params, "daily_calibration", "leader_min", 89.0),
+        )
+    )
     setup_min = float(_cfg_get(params, "daily_calibration", "standard_setup_min", 58.0))
     trigger_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "trigger_min", 72.0))
     cum_vol_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "cum_vol_ratio_min", 0.0))

@@ -1,15 +1,17 @@
 {
   "daily_calibration": {
-    "leader_min": 94.0,
+    "leader_min": 92.0,
+    "standard_leader_min": 92.0,
+    "tight_leader_min": 94.0,
     "leader_quantile": 0.85,
-    "standard_setup_min": 70.0,
+    "standard_setup_min": 68.0,
     "tight_setup_min": 50.0,
     "use_setup_max": false
   },
   "intraday_calibration": {
     "standard_breakout": {
-      "trigger_min": 80.0,
-      "cum_vol_ratio_min": 1.35,
+      "trigger_min": 82.0,
+      "cum_vol_ratio_min": 1.0,
       "bar_vol_ratio_min": 0.0
     },
     "tight_reversal": {
@@ -22,8 +24,8 @@
     }
   },
   "metadata": {
-    "generated_at": "2026-04-25T16:25:52.132749+09:00",
-    "source": "calibrate_two_lane_breakout_params.py",
-    "selection_note": "Grid search on 341-session FMP 5m triggers, using 10y FMP daily scores and 20-session forward returns."
+    "generated_at": "2026-04-26T20:58:03.102332+09:00",
+    "source": "recalibrate_current_system_params.py",
+    "selection_note": "Recalibrated on current system: industry composite + A+ replacement, super-winner runner exit, 5 slots, 25% allocation, 0.2% each-side commission. Selected from QMMM-excluded calibration score; QMMM-inclusive validation improved as well."
   }
 }
