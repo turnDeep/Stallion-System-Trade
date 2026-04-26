@@ -57,10 +57,49 @@ def _payload_dict(raw_payload: object) -> dict[str, Any]:
         return {}
 
 
-TAX_RATE = 0.20315  # 所得税15.315% + 住民税5%
+TAX_RATE = 0.20315  # Japan capital gains tax: income tax 15.315% + local tax 5%.
+TAX_RESERVE_STATE_KEY = "tax_reserve_usd"
 
 
-def _notify_tax_if_profitable(
+def _load_tax_reserve_state(store: SQLiteParquetStore) -> dict[str, Any]:
+    raw = store.get_system_state(TAX_RESERVE_STATE_KEY)
+    if not raw:
+        return {"reserved_tax_usd": 0.0, "realized_profit_usd": 0.0, "events": 0}
+    try:
+        payload = json.loads(raw)
+        return {
+            "reserved_tax_usd": float(payload.get("reserved_tax_usd", 0.0)),
+            "realized_profit_usd": float(payload.get("realized_profit_usd", 0.0)),
+            "events": int(payload.get("events", 0)),
+        }
+    except Exception:
+        # Backward compatibility if the state was ever stored as a plain number.
+        try:
+            return {"reserved_tax_usd": float(raw), "realized_profit_usd": 0.0, "events": 0}
+        except Exception:
+            return {"reserved_tax_usd": 0.0, "realized_profit_usd": 0.0, "events": 0}
+
+
+def _save_tax_reserve_state(store: SQLiteParquetStore, state: dict[str, Any]) -> None:
+    payload = {
+        "reserved_tax_usd": round(float(state.get("reserved_tax_usd", 0.0)), 2),
+        "realized_profit_usd": round(float(state.get("realized_profit_usd", 0.0)), 2),
+        "events": int(state.get("events", 0)),
+        "updated_at": pd.Timestamp.utcnow().isoformat(),
+    }
+    store.put_system_state(TAX_RESERVE_STATE_KEY, json.dumps(payload, ensure_ascii=True, default=str))
+
+
+def _reserved_tax_usd(store: SQLiteParquetStore) -> float:
+    return max(0.0, float(_load_tax_reserve_state(store).get("reserved_tax_usd", 0.0)))
+
+
+def _tax_adjusted_buying_power(store: SQLiteParquetStore, raw_buying_power: float) -> float:
+    return max(0.0, float(raw_buying_power) - _reserved_tax_usd(store))
+
+
+def _reserve_tax_if_profitable(
+    store: SQLiteParquetStore,
     notifier: DiscordNotifier,
     *,
     symbol: str,
@@ -68,26 +107,35 @@ def _notify_tax_if_profitable(
     exit_price: float,
     shares: int,
     reason: str,
-) -> None:
-    """利益が出た場合のみ、税金換金アラートをDiscordへ送信する。"""
+) -> float:
+    """Reserve estimated Japan tax on profitable sells and notify Discord."""
     profit_usd = (exit_price - entry_price) * shares
     if profit_usd <= 0:
-        return  # 損失・プラマイゼロ → 通知不要
+        return 0.0
     tax_usd = profit_usd * TAX_RATE
+    state = _load_tax_reserve_state(store)
+    state["reserved_tax_usd"] = float(state.get("reserved_tax_usd", 0.0)) + tax_usd
+    state["realized_profit_usd"] = float(state.get("realized_profit_usd", 0.0)) + profit_usd
+    state["events"] = int(state.get("events", 0)) + 1
+    _save_tax_reserve_state(store, state)
+
+    total_reserved_tax = float(state["reserved_tax_usd"])
     notifier.notify(
-        "⚠️ 税金換金アラート",
+        "税金用ドル保持アラート",
         [
-            f"- symbol:     {symbol}",
-            f"- reason:     {reason}",
-            f"- shares:     {shares} 株",
-            f"- entry:      ${entry_price:.2f}",
-            f"- exit:       ${exit_price:.2f}",
-            f"- 利益:        ${profit_usd:.2f} USD",
-            f"- 税金概算:    ${tax_usd:.2f} USD (20.315%)",
-            "- 👉 Webull アプリで上記金額を USD → JPY に換金してください",
+            f"利益が ${profit_usd:.2f} USD 出たため、${tax_usd:.2f} USD 保持しました。",
+            f"- symbol: {symbol}",
+            f"- reason: {reason}",
+            f"- shares: {shares}",
+            f"- entry: ${entry_price:.2f}",
+            f"- exit: ${exit_price:.2f}",
+            f"- tax_rate: {TAX_RATE:.3%}",
+            f"- total_reserved_tax_usd: ${total_reserved_tax:.2f}",
+            "- Webullでは円貨で税金が引かれるため、必要に応じて手動で USD を JPY に為替取引してください。",
         ],
         level="WARNING",
     )
+    return float(tax_usd)
 
 
 def _build_quote_snapshot_frame(quotes: pd.DataFrame, observed_at_utc: pd.Timestamp) -> pd.DataFrame:
@@ -353,7 +401,8 @@ def _evaluate_intraday_hard_stops(
             )
             if submitted is not None:
                 notifier.notify("SELL ORDER SUBMITTED", [f"- symbol: {state.symbol}", f"- qty: {state.shares}", "- reason: intraday_hard_stop"])
-                _notify_tax_if_profitable(
+                _reserve_tax_if_profitable(
+                    store,
                     notifier,
                     symbol=state.symbol,
                     entry_price=state.entry_price,
@@ -414,7 +463,8 @@ def _evaluate_end_of_day_exits(
                     payload={**payload, "exit_reason": action.get("reason")},
                 )
                 if submitted_reduce is not None:
-                    _notify_tax_if_profitable(
+                    _reserve_tax_if_profitable(
+                        store,
                         notifier,
                         symbol=state.symbol,
                         entry_price=state.entry_price,
@@ -443,7 +493,8 @@ def _evaluate_end_of_day_exits(
                 payload={**payload, "exit_reason": action.get("reason")},
             )
             if submitted_all is not None:
-                _notify_tax_if_profitable(
+                _reserve_tax_if_profitable(
+                    store,
                     notifier,
                     symbol=state.symbol,
                     entry_price=state.entry_price,
@@ -495,7 +546,15 @@ def run_live_trader(settings: Settings | None = None) -> None:
     while True:
         now_ny = _ny_now(settings)
         now_utc = pd.Timestamp.now(tz="UTC")
-        store.write_heartbeat("live_trader", "running", {"now_ny": now_ny.isoformat(), "strategy": "qullamaggie_breakout"})
+        store.write_heartbeat(
+            "live_trader",
+            "running",
+            {
+                "now_ny": now_ny.isoformat(),
+                "strategy": "qullamaggie_breakout",
+                "reserved_tax_usd": _reserved_tax_usd(store),
+            },
+        )
 
         if now_ny.weekday() >= 5:
             notifier.flush()
@@ -615,16 +674,18 @@ def run_live_trader(settings: Settings | None = None) -> None:
             )[["session_date", "timestamp", "symbol", "score", "threshold", "selected", "payload_json"]]
         )
 
-        current_buying_power = broker.get_account_buying_power()
+        raw_buying_power = broker.get_account_buying_power()
+        current_buying_power = _tax_adjusted_buying_power(store, raw_buying_power)
+        effective_opening_buying_power = _tax_adjusted_buying_power(store, float(opening_buying_power))
         held_symbols = set(open_positions["symbol"].tolist())
         for row in selected.itertuples(index=False):
             if row.symbol in held_symbols:
                 continue
 
-            desired_slot_cash = float(opening_buying_power) * cfg.max_alloc_pct_per_trade
+            desired_slot_cash = float(effective_opening_buying_power) * cfg.max_alloc_pct_per_trade
             precheck_state = build_position_state_from_signal(
                 row,
-                equity=opening_buying_power,
+                equity=effective_opening_buying_power,
                 cash=max(float(current_buying_power), desired_slot_cash),
                 cfg=cfg,
             )
@@ -664,7 +725,8 @@ def run_live_trader(settings: Settings | None = None) -> None:
                     ],
                     level="WARNING",
                 )
-                _notify_tax_if_profitable(
+                reserved_tax = _reserve_tax_if_profitable(
+                    store,
                     notifier,
                     symbol=replacement["symbol"],
                     entry_price=float(replacement_payload.get("entry_price") or replacement["last_price"]),
@@ -679,11 +741,14 @@ def run_live_trader(settings: Settings | None = None) -> None:
                 ]
                 _replace_position_rows(store, remaining_rows)
                 held_symbols = {str(p.get("symbol") or "").upper() for p in remaining_rows}
-                current_buying_power += float(replacement["last_price"]) * int(replacement["quantity"])
+                current_buying_power += max(
+                    0.0,
+                    float(replacement["last_price"]) * int(replacement["quantity"]) - reserved_tax,
+                )
             elif len(held_symbols) >= cfg.max_positions:
                 continue
 
-            state = build_position_state_from_signal(row, equity=opening_buying_power, cash=current_buying_power, cfg=cfg)
+            state = build_position_state_from_signal(row, equity=effective_opening_buying_power, cash=current_buying_power, cfg=cfg)
             if state is None:
                 continue
 
