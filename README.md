@@ -1,20 +1,25 @@
-﻿# Auto-Swing-Trade-Bot
+# Auto-Swing-Trade-Bot
 
 English | [日本語](./README.ja.md)
 
-Auto-Swing-Trade-Bot is a Qullamaggie-style breakout swing trading system for U.S. equities.
+Auto-Swing-Trade-Bot is a fully automated, **Qullamaggie-style breakout swing trading system** for U.S. equities. It handles everything from nightly universe screening to live intraday execution, allowing for hands-off swing trading.
 
-- Universe: top 3000 U.S. stocks by market cap from FMP
-- Signal engine: daily setup + intraday 5-minute breakout confirmation
-- Portfolio style: swing positions with overnight holds
-- Storage: SQLite + Parquet snapshots plus daily archive files
-- Runtime: Webull-backed live mode or automatic demo mode fallback
+## 🌟 System Overview
 
-## Core Flow
+This system is designed to identify and trade explosive multi-day or multi-week moves (swing trades) by entering precisely when a stock breaks out of a daily consolidation pattern.
 
-1. Run the nightly breakout pipeline to refresh universe, daily bars, 5-minute bars, signal report, and next-session shortlist.
-2. Run the live trader during market hours to monitor shortlist symbols, detect breakouts, place entries, and manage open swing positions.
-3. Let the scheduler orchestrate nightly refresh and market-hours execution.
+- **Universe:** Top 3000 U.S. stocks by market cap, fetched via Financial Modeling Prep (FMP).
+- **Trading Strategy (Qullamaggie Style):** Focuses on stocks with strong momentum. It identifies daily setups (consolidations, flags) and triggers entries based on intraday 5-minute breakout confirmations.
+- **Advanced Signal Engines:** Incorporates multiple sub-strategies including standard breakouts, zigzag breakouts, entry lanes, and industry-priority scoring.
+- **Portfolio Management:** Swing positions with overnight holds. It includes dynamic exit strategies (trailing stops) and a tax reserve manager to safeguard profits.
+- **Runtime Environment:** Runs via Docker. Connects to Webull for live trading, with an automatic fallback to "Demo Mode" if API credentials are not provided.
+- **Data Storage:** Uses a robust mix of SQLite, Parquet snapshots, and daily archive files for persistent historical data, circumventing API rate limits.
+
+## ⚙️ Core Workflow
+
+1. **Nightly Pipeline:** Runs after market close. It updates the stock universe, fetches daily and 5-minute bars, calculates signal scores, and generates a "shortlist" of top candidates for the next session.
+2. **Live Trader:** Runs during market hours. It actively monitors the shortlisted symbols, detects real-time breakouts, places orders, and manages stop-losses for open swing positions.
+3. **Scheduler:** The master process that orchestrates both the nightly refresh and the live trading seamlessly.
 
 ## Main Commands
 
