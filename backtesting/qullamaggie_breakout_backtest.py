@@ -132,6 +132,8 @@ def normalize_intraday_input(obj: Any) -> pd.DataFrame:
         raise ValueError(f"intraday missing columns: {sorted(missing)}")
 
     intra["datetime"] = pd.to_datetime(intra["datetime"])
+    if getattr(intra["datetime"].dt, "tz", None) is not None:
+        intra["datetime"] = intra["datetime"].dt.tz_convert("America/New_York").dt.tz_localize(None)
     for c in ["open", "high", "low", "close", "volume"]:
         intra[c] = pd.to_numeric(intra[c], errors="coerce").astype(float)
 
@@ -360,8 +362,8 @@ def prepare_signals(signals: pd.DataFrame) -> pd.DataFrame:
     if "leader_score" not in sig.columns:
         sig["leader_score"] = np.nan
 
-    # 同一 symbol/date に standard + zigzag が�E存しても、E
-    # 優先頁E��ルールで 1 行に潰して backtest merge を安定化させる、E
+    # 同一 symbol/date に standard + zigzag が�E存しても、E
+    # 優先頁E��ルールで 1 行に潰して backtest merge を安定化させる、E
     sig = (
         sig.sort_values(
             [
@@ -689,7 +691,7 @@ def run_backtest(
         # --------------------------------------------------------
         todays = df.loc[df["date"].eq(cur_date) & df["breakout_signal"]].copy()
         if not todays.empty:
-            # 優先頁E��付け�E�同時に発火した場合�E枠割り当ての厳選�E�E
+            # 優先頁E��付け�E�同時に発火した場合�E枠割り当ての厳選�E�E
             sort_cols = []
             sort_asc = []
             if "entry_priority_bucket" in todays.columns:
@@ -725,11 +727,9 @@ def run_backtest(
                     if gap_pct >= cfg.ep_gap_exclusion_pct:
                         continue
 
-                pivot_level = float(row.pivot_high)
-                breakout_day_low = float(row.low)
-
                 entry_price = None
                 entry_bar_time = None
+                low_so_far_at_trigger = None
 
                 if cfg.use_intraday_trigger_time and intraday is not None and hasattr(row, "trigger_time") and pd.notna(row.trigger_time):
                     intra_day = intra_groups.get((row.symbol, cur_date))
@@ -739,15 +739,29 @@ def run_backtest(
                         if len(match) > 0:
                             entry_bar = match.iloc[0]
                             entry_bar_time = pd.Timestamp(entry_bar["datetime"])
+                            known = intra_day.loc[intra_day["datetime"] <= entry_bar_time]
+                            if len(known) > 0:
+                                low_so_far_at_trigger = float(known["low"].min())
                             if cfg.entry_at == "trigger_close":
                                 entry_price = float(entry_bar["close"])
 
                 if entry_price is None:
                     entry_price = float(row.close)
                     entry_bar_time = None
+                    if hasattr(row, "low_so_far_at_trigger") and pd.notna(row.low_so_far_at_trigger):
+                        low_so_far_at_trigger = float(row.low_so_far_at_trigger)
+                    elif hasattr(row, "trigger_bar_low") and pd.notna(row.trigger_bar_low):
+                        low_so_far_at_trigger = float(row.trigger_bar_low)
 
                 if not np.isfinite(entry_price) or entry_price <= 0:
                     continue
+
+                pivot_level = float(row.pivot_high)
+                breakout_day_low = (
+                    float(low_so_far_at_trigger)
+                    if low_so_far_at_trigger is not None and np.isfinite(low_so_far_at_trigger)
+                    else float(row.low)
+                )
 
                 stop_buffer = cfg.stop_buffer_bps / 10000.0
                 initial_stop = min(breakout_day_low, pivot_level) * (1.0 - stop_buffer)

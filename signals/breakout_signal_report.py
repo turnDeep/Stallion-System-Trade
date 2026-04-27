@@ -28,26 +28,27 @@ CALIBRATED_PARAMS_PATH = REPO_ROOT / "configs" / "calibrated_params.json"
 
 DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
     "daily_calibration": {
-        "leader_min": 89.0,
-        "standard_leader_min": 89.0,
-        "tight_leader_min": 89.0,
+        "leader_min": 60.0,
+        "standard_leader_min": 60.0,
+        "tight_leader_min": 63.0,
         "leader_quantile": 0.85,
-        "standard_setup_min": 58.0,
-        "tight_setup_min": 57.0,
+        "standard_setup_min": 68.0,
+        "tight_setup_min": 55.0,
         "use_setup_max": False,
     },
     "intraday_calibration": {
         "standard_breakout": {
-            "trigger_min": 72.0,
-            "cum_vol_ratio_min": 0.0,
+            "trigger_min": 82.0,
+            "cum_vol_ratio_min": 1.5,
             "bar_vol_ratio_min": 0.0,
+            "move_from_open_min": 0.02,
         },
         "tight_reversal": {
-            "trigger_min": 69.0,
+            "trigger_min": 75.0,
             "cum_vol_ratio_min": 0.0,
             "bar_vol_ratio_min": 0.0,
-            "entry_dist_norm_max": 0.80,
-            "gap_norm_max": 0.70,
+            "entry_dist_norm_max": 1.0,
+            "gap_norm_max": 1.1,
             "same_day_stop_rate_max": 0.35,
         },
     },
@@ -94,6 +95,17 @@ def _nested_get(
     if not isinstance(subvalues, dict):
         return default
     return subvalues.get(key, default)
+
+
+def _standard_leader_min_from_params(params: dict[str, object]) -> float:
+    return float(
+        _cfg_get(
+            params,
+            "daily_calibration",
+            "standard_leader_min",
+            _cfg_get(params, "daily_calibration", "leader_min", 60.0),
+        )
+    )
 
 
 def _zigzag_entry_config_from_params(params: dict[str, object]) -> ZigZagEntryConfig:
@@ -268,18 +280,14 @@ def _finalize_report(
     first_breakouts: pd.DataFrame,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     params = load_calibrated_params()
-    leader_min = float(
-        _cfg_get(
-            params,
-            "daily_calibration",
-            "standard_leader_min",
-            _cfg_get(params, "daily_calibration", "leader_min", 89.0),
-        )
-    )
+    leader_min = _standard_leader_min_from_params(params)
     setup_min = float(_cfg_get(params, "daily_calibration", "standard_setup_min", 58.0))
     trigger_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "trigger_min", 72.0))
     cum_vol_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "cum_vol_ratio_min", 0.0))
     bar_vol_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "bar_vol_ratio_min", 0.0))
+    move_from_open_min = float(
+        _nested_get(params, "intraday_calibration", "standard_breakout", "move_from_open_min", 0.0)
+    )
 
     report = setup_candidates.merge(
         first_breakouts,
@@ -293,6 +301,7 @@ def _finalize_report(
     trigger_score = pd.to_numeric(report["trigger_score"], errors="coerce")
     cum_vol_ratio = pd.to_numeric(report["cum_vol_ratio_at_trigger"], errors="coerce").fillna(0.0)
     bar_vol_ratio = pd.to_numeric(report["bar_vol_ratio_at_trigger"], errors="coerce").fillna(0.0)
+    move_from_open = pd.to_numeric(report["move_from_open_at_trigger"], errors="coerce").fillna(-np.inf)
     report["standard_rule_pass"] = (
         report["broke_out"]
         & (pd.to_numeric(report["leader_score"], errors="coerce") >= leader_min)
@@ -300,6 +309,7 @@ def _finalize_report(
         & (trigger_score >= trigger_min)
         & (cum_vol_ratio >= cum_vol_min)
         & (bar_vol_ratio >= bar_vol_min)
+        & (move_from_open >= move_from_open_min)
     )
     report["golden_rule_pass"] = report["standard_rule_pass"]
     report["breakout_signal"] = (
@@ -388,6 +398,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_res_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
             ]
         )
 
@@ -519,6 +531,8 @@ def _compute_intraday_first_breakouts(
     intra["bar_vol_ratio_at_trigger"] = intra["bar_vol_ratio"]
     intra["move_from_open_at_trigger"] = move_from_open
     intra["dist_above_res_at_trigger"] = dist_above_res
+    intra["trigger_bar_low"] = intra["low"]
+    intra["low_so_far_at_trigger"] = intra["session_low_so_far"]
 
     trig = intra.loc[intra["breakout_any_intraday"]].copy()
     if trig.empty:
@@ -533,6 +547,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_res_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
             ]
         )
 
@@ -564,6 +580,8 @@ def _compute_intraday_first_breakouts(
             "bar_vol_ratio_at_trigger",
             "move_from_open_at_trigger",
             "dist_above_res_at_trigger",
+            "trigger_bar_low",
+            "low_so_far_at_trigger",
         ]
     ]
 
@@ -607,7 +625,11 @@ def _build_standard_breakout_signal_report(
         session_min = pd.to_datetime(intraday_long["session_date"]).min().normalize()
         session_max = pd.to_datetime(intraday_long["session_date"]).max().normalize()
 
-    daily_scored = compute_breakout_scores_with_diag(daily_long)
+    params = load_calibrated_params()
+    daily_scored = compute_breakout_scores_with_diag(
+        daily_long,
+        leader_rank_min=_standard_leader_min_from_params(params),
+    )
     setup_candidates = _prepare_setup_candidates(daily_scored, session_min, session_max)
     first_breakouts = _compute_intraday_first_breakouts(intraday_long, daily_scored)
     return _finalize_report(setup_candidates, first_breakouts)
@@ -673,6 +695,7 @@ def _merge_standard_and_zigzag_reports(
         "standard_breakout_signal", "zigzag_breakout_signal",
         "entry_source", "entry_lane", "entry_stop_policy",
         "same_day_priority_score",
+        "trigger_bar_low", "low_so_far_at_trigger",
     ]
     zz_keep = [
         "symbol", "date", "open", "high", "low", "close", "volume",
@@ -688,6 +711,7 @@ def _merge_standard_and_zigzag_reports(
         "gap_pct", "positive_gap_norm", "entry_filter_reason",
         "trigger_pts_breakout", "trigger_pts_price_expansion",
         "trigger_pts_reversal", "trigger_pts_hold",
+        "trigger_bar_low", "low_so_far_at_trigger",
         "broke_out",
     ]
 
@@ -780,7 +804,11 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
     print(f"Daily universe rows: {len(daily_df):,}")
 
     # standard 蛛ｴ蛟呵｣懈律
-    standard_daily_scored = compute_breakout_scores_with_diag(daily_df)
+    calibrated_params = load_calibrated_params()
+    standard_daily_scored = compute_breakout_scores_with_diag(
+        daily_df,
+        leader_rank_min=_standard_leader_min_from_params(calibrated_params),
+    )
     standard_setup_candidates = _prepare_setup_candidates(standard_daily_scored, session_min, session_max)
 
     # zigzag 蛛ｴ蛟呵｣懈律
