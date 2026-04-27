@@ -18,14 +18,16 @@ class IndustryPriorityConfig:
     setup_sweet_weight: float = 8.0
     small_cap_weight: float = 5.0
     standard_bonus: float = 3.0
+    a_plus_priority_boost: float = 200.0
 
     leader_min_for_norm: float = 94.0
     setup_sweet_center: float = 74.0
     setup_sweet_half_width: float = 8.0
-    a_plus_min_industry_rs: float = 0.70
-    a_plus_min_setup_sweet: float = 0.65
-    a_plus_min_volume_thrust: float = 0.75
-    a_plus_min_move_thrust: float = 0.50
+    a_plus_leader_min: float = 95.0
+    a_plus_setup_min: float = 68.0
+    a_plus_trigger_min: float = 77.0
+    a_plus_cum_vol_ratio_min: float = 3.0
+    a_plus_move_from_open_min: float = -0.05
     replacement_score_margin: float = 18.0
     strong_winner_gain: float = 0.50
     protected_a_plus_gain: float = 0.10
@@ -86,8 +88,22 @@ def build_industry_rs(daily: pd.DataFrame, universe: pd.DataFrame) -> pd.DataFra
         .median()
         .dropna(subset=["industry_momentum"])
     )
-    industry_daily["industry_rs_pct"] = industry_daily.groupby("date")["industry_momentum"].rank(pct=True)
-    return industry_daily[["date", "industry", "industry_momentum", "industry_rs_pct"]]
+    industry_daily["industry_momentum_eod"] = industry_daily["industry_momentum"]
+    industry_daily["industry_rs_pct_eod"] = industry_daily.groupby("date")["industry_momentum"].rank(pct=True)
+    industry_daily = industry_daily.sort_values(["industry", "date"], kind="mergesort")
+    # Same-day entries cannot know the close-based industry rank for that day.
+    industry_daily["industry_momentum"] = industry_daily.groupby("industry", sort=False)["industry_momentum_eod"].shift(1)
+    industry_daily["industry_rs_pct"] = industry_daily.groupby("industry", sort=False)["industry_rs_pct_eod"].shift(1)
+    return industry_daily[
+        [
+            "date",
+            "industry",
+            "industry_momentum",
+            "industry_rs_pct",
+            "industry_momentum_eod",
+            "industry_rs_pct_eod",
+        ]
+    ]
 
 
 def add_industry_composite_priority(
@@ -115,13 +131,25 @@ def add_industry_composite_priority(
 
     industry_rs = build_industry_rs(daily, uni)
     if not industry_rs.empty:
-        out = out.drop(columns=[c for c in ["industry_momentum", "industry_rs_pct"] if c in out.columns])
+        out = out.drop(
+            columns=[
+                c
+                for c in [
+                    "industry_momentum",
+                    "industry_rs_pct",
+                    "industry_momentum_eod",
+                    "industry_rs_pct_eod",
+                ]
+                if c in out.columns
+            ]
+        )
         out = out.merge(industry_rs, on=["date", "industry"], how="left")
     elif "industry_rs_pct" not in out.columns:
         out["industry_rs_pct"] = np.nan
 
     leader = pd.to_numeric(out.get("leader_score"), errors="coerce")
     setup = pd.to_numeric(out.get("setup_score_pre"), errors="coerce")
+    trigger = pd.to_numeric(out.get("trigger_score"), errors="coerce")
     cumvol = pd.to_numeric(out.get("cum_vol_ratio_at_trigger"), errors="coerce").fillna(0.0)
     barvol = pd.to_numeric(out.get("bar_vol_ratio_at_trigger"), errors="coerce").fillna(0.0)
     move = pd.to_numeric(out.get("move_from_open_at_trigger"), errors="coerce").fillna(0.0)
@@ -137,6 +165,13 @@ def add_industry_composite_priority(
     move_thrust = _clip01((move - 0.02) / 0.08)
     setup_sweet = _clip01(1.0 - (setup - cfg.setup_sweet_center).abs() / cfg.setup_sweet_half_width)
     standard_bonus = out.get("entry_source", pd.Series("", index=out.index)).eq("standard_breakout").astype(float)
+    a_plus_candidate = (
+        (leader >= cfg.a_plus_leader_min)
+        & (setup >= cfg.a_plus_setup_min)
+        & (trigger >= cfg.a_plus_trigger_min)
+        & (cumvol >= cfg.a_plus_cum_vol_ratio_min)
+        & (move >= cfg.a_plus_move_from_open_min)
+    ).fillna(False)
 
     out["priority_leader98"] = leader98
     out["priority_leader_score_norm"] = leader_score_norm
@@ -147,6 +182,7 @@ def add_industry_composite_priority(
     out["priority_industry_rs"] = industry_rs_pct
     out["priority_small_cap"] = small_cap_score
     out["priority_standard_bonus"] = standard_bonus
+    out["priority_a_plus_candidate"] = a_plus_candidate.astype(float)
     out["same_day_priority_score"] = (
         cfg.leader98_bonus * leader98
         + cfg.leader_score_weight * leader_score_norm
@@ -157,8 +193,9 @@ def add_industry_composite_priority(
         + cfg.setup_sweet_weight * setup_sweet
         + cfg.small_cap_weight * small_cap_score
         + cfg.standard_bonus * standard_bonus
+        + cfg.a_plus_priority_boost * a_plus_candidate.astype(float)
     )
-    out["industry_a_plus_candidate"] = out.apply(lambda row: is_a_plus_candidate(row, cfg=cfg), axis=1)
+    out["industry_a_plus_candidate"] = a_plus_candidate.astype(bool)
     return out
 
 
@@ -173,16 +210,17 @@ def is_a_plus_candidate(row: Mapping[str, Any] | pd.Series | Any, cfg: IndustryP
     else:
         item = dict(row)
 
-    leader98 = _num(item, "priority_leader98", 0.0) >= 1.0 or _num(item, "leader_score", 0.0) >= 98.0
-    industry_rs = _num(item, "priority_industry_rs", _num(item, "industry_rs_pct", 0.5))
-    setup_sweet = _num(item, "priority_setup_sweet", 0.0)
-    volume = _num(item, "priority_volume_thrust", 0.0)
-    move = _num(item, "priority_move_thrust", 0.0)
+    leader = _num(item, "leader_score", 0.0)
+    setup = _num(item, "setup_score_pre", 0.0)
+    trigger = _num(item, "trigger_score", 0.0)
+    cumvol = _num(item, "cum_vol_ratio_at_trigger", 0.0)
+    move = _num(item, "move_from_open_at_trigger", 0.0)
     return bool(
-        leader98
-        and industry_rs >= cfg.a_plus_min_industry_rs
-        and setup_sweet >= cfg.a_plus_min_setup_sweet
-        and (volume >= cfg.a_plus_min_volume_thrust or move >= cfg.a_plus_min_move_thrust)
+        leader >= cfg.a_plus_leader_min
+        and setup >= cfg.a_plus_setup_min
+        and trigger >= cfg.a_plus_trigger_min
+        and cumvol >= cfg.a_plus_cum_vol_ratio_min
+        and move >= cfg.a_plus_move_from_open_min
     )
 
 

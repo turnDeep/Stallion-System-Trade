@@ -1,31 +1,32 @@
 {
   "daily_calibration": {
-    "leader_min": 92.0,
-    "standard_leader_min": 92.0,
-    "tight_leader_min": 94.0,
+    "leader_min": 60.0,
+    "standard_leader_min": 60.0,
+    "tight_leader_min": 63.0,
     "leader_quantile": 0.85,
     "standard_setup_min": 68.0,
-    "tight_setup_min": 50.0,
+    "tight_setup_min": 55.0,
     "use_setup_max": false
   },
   "intraday_calibration": {
     "standard_breakout": {
       "trigger_min": 82.0,
-      "cum_vol_ratio_min": 1.0,
-      "bar_vol_ratio_min": 0.0
+      "cum_vol_ratio_min": 1.5,
+      "bar_vol_ratio_min": 0.0,
+      "move_from_open_min": 0.02
     },
     "tight_reversal": {
-      "trigger_min": 65.0,
-      "cum_vol_ratio_min": 1.0,
+      "trigger_min": 75.0,
+      "cum_vol_ratio_min": 0.0,
       "bar_vol_ratio_min": 0.0,
-      "entry_dist_norm_max": 1.2,
+      "entry_dist_norm_max": 1.0,
       "gap_norm_max": 1.1,
       "same_day_stop_rate_max": 0.35
     }
   },
   "metadata": {
-    "generated_at": "2026-04-26T20:58:03.102332+09:00",
-    "source": "recalibrate_current_system_params.py",
-    "selection_note": "Recalibrated on current system: industry composite + A+ replacement, super-winner runner exit, 5 slots, 25% allocation, 0.2% each-side commission. Selected from QMMM-excluded calibration score; QMMM-inclusive validation improved as well."
+    "generated_at": "2026-04-27T00:00:00+09:00",
+    "source": "no-lookahead balanced_dd35 validation",
+    "selection_note": "No-lookahead balanced_dd35 conditions: standard leader>=60/setup>=68/trigger>=82/cumvol>=1.5/move>=2%; tight leader>=63/setup>=55/trigger>=75/dist_norm<=1.0/gap_norm<=1.1; A+ replacement leader>=95/setup>=68/trigger>=77/cumvol>=3/move>=-5%."
   }
 }

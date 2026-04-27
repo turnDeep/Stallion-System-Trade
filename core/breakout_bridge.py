@@ -254,9 +254,12 @@ def build_position_state_from_signal(
         if gap_pct >= cfg.ep_gap_exclusion_pct:
             return None
 
-    # ZigZag 用の effective_pivot_level があれ�Eそれを使ぁE
+    # ZigZag 用の effective_pivot_level があれ�Eそれを使ぁE
     pivot_level = pd.to_numeric(item.get("effective_pivot_level", item.get("pivot_high")), errors="coerce")
-    breakout_day_low = pd.to_numeric(item.get("low"), errors="coerce")
+    breakout_day_low = pd.to_numeric(
+        item.get("low_so_far_at_trigger", item.get("trigger_bar_low", item.get("low"))),
+        errors="coerce",
+    )
     if not np.isfinite(pivot_level) or not np.isfinite(breakout_day_low):
         return None
 
@@ -270,7 +273,7 @@ def build_position_state_from_signal(
     if not np.isfinite(risk_per_share) or risk_per_share <= 0:
         return None
 
-    # stop limit (ATR/ADR) チェチE��、Eigzag 側で無視指定があればスキチE�E
+    # stop limit (ATR/ADR) チェチE��、Eigzag 側で無視指定があればスキチE�E
     entry_stop_policy = str(item.get("entry_stop_policy", "respect_stop_limit"))
     if entry_stop_policy == "respect_stop_limit":
         atr20 = pd.to_numeric(item.get("atr20"), errors="coerce")
@@ -465,6 +468,8 @@ def signals_from_report(report: pd.DataFrame) -> pd.DataFrame:
         "trigger_time",
         "trigger_close",
         "trigger_score",
+        "cum_vol_ratio_at_trigger",
+        "move_from_open_at_trigger",
         "entry_source",
         "entry_lane",
         "entry_stop_policy",
@@ -472,13 +477,17 @@ def signals_from_report(report: pd.DataFrame) -> pd.DataFrame:
         "priority_score_within_source",
         "same_day_priority_score",
         "industry_a_plus_candidate",
+        "priority_a_plus_candidate",
         "priority_leader98",
         "priority_volume_thrust",
         "priority_move_thrust",
         "priority_industry_rs",
         "priority_setup_sweet",
         "leader_score",
+        "setup_score_pre",
         "rs_rating",
+        "trigger_bar_low",
+        "low_so_far_at_trigger",
     ]
     work = report.copy()
     work["breakout_signal"] = work["breakout_signal"].fillna(False).astype(bool)

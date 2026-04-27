@@ -61,9 +61,13 @@ def _diag_resistance_from_swings_np_impl(
         last_px = np.nan
 
         for i in range(m):
-            if sh[i]:
+            # A swing high is only tradable after the right-side confirmation
+            # bars have printed. The pivot is anchored at confirm_idx, but we
+            # only add it to the usable line state at the current bar.
+            confirm_idx = i - swing_right
+            if confirm_idx >= 0 and sh[confirm_idx]:
                 prev_idx, prev_px = last_idx, last_px
-                last_idx, last_px = i, h[i]
+                last_idx, last_px = confirm_idx, h[confirm_idx]
 
             if prev_idx >= 0 and last_idx >= 0 and i >= last_idx:
                 gap = last_idx - prev_idx
@@ -268,17 +272,24 @@ def compute_breakout_scores_with_diag(
     out["rank_roc_126"] = out["rs_pct_126"]
 
     w21, w63, w126 = leader_weights
-    out["rs_rating"] = (
+    out["rs_rating_eod"] = (
         w21 * out["rs_pct_21"].fillna(0.0)
         + w63 * out["rs_pct_63"].fillna(0.0)
         + w126 * out["rs_pct_126"].fillna(0.0)
     )
+    # Same-day intraday entries must not know today's closing RS rank.
+    # leader_score is therefore the latest fully known prior-session value.
+    out["rs_rating"] = by_symbol_shift(out["rs_rating_eod"], 1)
+    out["leader_score_eod"] = out["rs_rating_eod"]
     out["leader_score"] = out["rs_rating"]
     out["leader_pass_rank"] = out["leader_score"] >= leader_rank_min
+    out["roc_21_pre"] = g["roc_21"].shift(1)
+    out["roc_63_pre"] = g["roc_63"].shift(1)
+    out["roc_126_pre"] = g["roc_126"].shift(1)
     out["leader_pass_fallback"] = (
-        (out["roc_21"] >= leader_fallback_roc21_min)
-        & (out["roc_63"] >= leader_fallback_roc63_min)
-        & (out["roc_126"] >= leader_fallback_roc126_min)
+        (out["roc_21_pre"] >= leader_fallback_roc21_min)
+        & (out["roc_63_pre"] >= leader_fallback_roc63_min)
+        & (out["roc_126_pre"] >= leader_fallback_roc126_min)
     )
     out["leader_pass"] = out["leader_pass_rank"] | out["leader_pass_fallback"]
 

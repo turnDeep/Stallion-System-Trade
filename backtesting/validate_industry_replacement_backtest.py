@@ -85,7 +85,16 @@ def simulate_super_winner_trade(
     day0 = rows.iloc[0]
     entry_price = _num(event, "trigger_close", "close", default=float(day0["close"]))
     pivot = _num(event, "effective_pivot_level", "pivot_high", "zigzag_line_value", default=float(day0["low"]))
-    initial_stop = min(float(day0["low"]), pivot) * 0.999
+    known_low = _num(
+        event,
+        "low_so_far_at_trigger",
+        "trigger_bar_low",
+        "entry_known_low",
+        default=np.nan,
+    )
+    if not np.isfinite(known_low):
+        known_low = float(day0["low"])
+    initial_stop = min(float(known_low), pivot) * 0.999
     risk_per_share = entry_price - initial_stop
     if not np.isfinite(entry_price) or entry_price <= 0 or not np.isfinite(risk_per_share) or risk_per_share <= 0:
         return {"symbol": symbol, "entry_date": entry_date, "exit_reason": "invalid_entry", "trade_return_pct": np.nan}, pd.DataFrame()

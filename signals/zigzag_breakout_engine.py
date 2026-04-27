@@ -453,6 +453,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_line_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
             ]
         )
 
@@ -470,6 +472,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_line_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
             ]
         )
 
@@ -491,6 +495,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_line_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
             ]
         )
 
@@ -498,6 +504,7 @@ def _compute_intraday_first_breakouts(
     intra["slot_index"] = intra.groupby(["symbol", "session_date"], sort=False).cumcount()
     intra["cum_volume_session"] = intra.groupby(["symbol", "session_date"], sort=False)["volume"].cumsum()
     intra["session_open"] = intra.groupby(["symbol", "session_date"], sort=False)["open"].transform("first")
+    intra["session_low_so_far"] = intra.groupby(["symbol", "session_date"], sort=False)["low"].cummin()
     intra["prev_bar_close_session"] = intra.groupby(["symbol", "session_date"], sort=False)["close"].shift(1)
     intra = _add_same_time_volume_features(intra)
     candidate_dates = (
@@ -594,6 +601,8 @@ def _compute_intraday_first_breakouts(
     intra["trigger_pts_hold"] = cfg.trigger_weight_hold * hold_quality
     intra["dist_above_line_at_trigger"] = dist_above_line
     intra["move_from_open_at_trigger"] = move_from_open
+    intra["trigger_bar_low"] = intra["low"]
+    intra["low_so_far_at_trigger"] = intra["session_low_so_far"]
 
     trig = intra.loc[intra["breakout_any_intraday"]].copy()
     if trig.empty:
@@ -609,6 +618,8 @@ def _compute_intraday_first_breakouts(
                 "bar_vol_ratio_at_trigger",
                 "move_from_open_at_trigger",
                 "dist_above_line_at_trigger",
+                "trigger_bar_low",
+                "low_so_far_at_trigger",
                 "trigger_pts_breakout",
                 "trigger_pts_volume",
                 "trigger_pts_price_expansion",
@@ -649,6 +660,8 @@ def _compute_intraday_first_breakouts(
         "bar_vol_ratio",
         "move_from_open_at_trigger",
         "dist_above_line_at_trigger",
+        "trigger_bar_low",
+        "low_so_far_at_trigger",
         "trigger_pts_breakout",
         "trigger_pts_volume",
         "trigger_pts_price_expansion",
