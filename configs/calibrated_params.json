@@ -13,7 +13,7 @@
       "trigger_min": 82.0,
       "cum_vol_ratio_min": 1.5,
       "bar_vol_ratio_min": 0.0,
-      "move_from_open_min": 0.02
+      "move_from_open_min": 0.0
     },
     "tight_reversal": {
       "trigger_min": 75.0,
@@ -25,8 +25,8 @@
     }
   },
   "metadata": {
-    "generated_at": "2026-04-27T00:00:00+09:00",
-    "source": "no-lookahead balanced_dd35 validation",
-    "selection_note": "No-lookahead balanced_dd35 conditions: standard leader>=60/setup>=68/trigger>=82/cumvol>=1.5/move>=2%; tight leader>=63/setup>=55/trigger>=75/dist_norm<=1.0/gap_norm<=1.1; A+ replacement leader>=95/setup>=68/trigger>=77/cumvol>=3/move>=-5%."
+    "generated_at": "2026-04-28T00:00:00+09:00",
+    "source": "no-lookahead core_move0 score validation",
+    "selection_note": "Core move0 conditions: standard leader>=60/setup>=68/trigger>=82/cumvol>=1.5/move>=0%; tight leader>=63/setup>=55/trigger>=75/dist_norm<=1.0/gap_norm<=1.1. Same-day ranking uses core_move0 score: leader/setup/trigger/volume/prior_runup/move plus leader>=95 bonus. A+ replacement remains leader>=95/setup>=68/trigger>=77/cumvol>=3/move>=-5%."
   }
 }

@@ -41,7 +41,7 @@ DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
             "trigger_min": 82.0,
             "cum_vol_ratio_min": 1.5,
             "bar_vol_ratio_min": 0.0,
-            "move_from_open_min": 0.02,
+            "move_from_open_min": 0.0,
         },
         "tight_reversal": {
             "trigger_min": 75.0,
@@ -691,6 +691,8 @@ def _merge_standard_and_zigzag_reports(
         "history_ok", "leader_pass", "setup_candidate",
         "leader_score", "setup_score_pre", "rs_rating",
         "trigger_time", "trigger_close", "trigger_score",
+        "cum_vol_ratio_at_trigger", "bar_vol_ratio_at_trigger",
+        "move_from_open_at_trigger", "dist_above_res_at_trigger",
         "breakout_type", "pivot_high", "effective_pivot_level",
         "standard_breakout_signal", "zigzag_breakout_signal",
         "entry_source", "entry_lane", "entry_stop_policy",
@@ -703,6 +705,8 @@ def _merge_standard_and_zigzag_reports(
         "history_ok", "leader_pass", "setup_candidate",
         "leader_score", "setup_score_pre", "rs_rating",
         "trigger_time", "trigger_close", "trigger_score",
+        "cum_vol_ratio_at_trigger", "bar_vol_ratio_at_trigger",
+        "move_from_open_at_trigger", "dist_above_res_at_trigger",
         "breakout_type", "pivot_high", "zigzag_line_value", "effective_pivot_level",
         "standard_breakout_signal", "zigzag_breakout_signal",
         "entry_source", "entry_lane", "entry_stop_policy",
@@ -844,10 +848,13 @@ def build_report() -> tuple[pd.DataFrame, pd.DataFrame]:
         "trigger_time_ny",
         "breakout_type",
         "trigger_score",
+        "cum_vol_ratio_at_trigger",
+        "move_from_open_at_trigger",
         "broke_out",
         "breakout_signal",
         "entry_source",
         "entry_lane",
+        "same_day_priority_score",
     ]
     report_to_save = report[[c for c in detail_cols if c in report.columns]].copy()
 
