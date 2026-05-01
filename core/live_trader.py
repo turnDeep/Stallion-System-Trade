@@ -207,6 +207,8 @@ def _position_state_from_row(row: dict[str, Any]) -> BreakoutPositionState | Non
     except Exception:
         return None
     entry_bar_time = pd.to_datetime(payload.get("trigger_time"), errors="coerce")
+    peak_close_payload = pd.to_numeric(payload.get("peak_close", entry_price), errors="coerce")
+    peak_close = float(peak_close_payload) if pd.notna(peak_close_payload) else entry_price
     return BreakoutPositionState(
         symbol=str(row.get("symbol") or "").upper(),
         entry_date=pd.to_datetime(payload.get("entry_date")),
@@ -225,6 +227,7 @@ def _position_state_from_row(row: dict[str, Any]) -> BreakoutPositionState | Non
         entry_lane=str(payload.get("entry_lane", "none")),
         same_day_priority_score=pd.to_numeric(payload.get("same_day_priority_score"), errors="coerce"),
         industry_a_plus_candidate=bool(payload.get("industry_a_plus_candidate", False)),
+        peak_close=peak_close,
     )
 
 
@@ -268,6 +271,7 @@ def _upsert_demo_position(
                         "entry_lane": state.entry_lane,
                         "same_day_priority_score": state.same_day_priority_score,
                         "industry_a_plus_candidate": state.industry_a_plus_candidate,
+                        "peak_close": state.peak_close,
                     },
                     ensure_ascii=True,
                 ),
@@ -385,8 +389,47 @@ def _evaluate_intraday_hard_stops(
         if state is None or state.shares <= 0:
             continue
         last_price = quote_map.get(state.symbol)
+        payload = _payload_dict(row.get("payload_json"))
+        prior_day_low = pd.to_numeric(payload.get("prior_day_low"), errors="coerce")
+        peak_close = pd.to_numeric(payload.get("peak_close", state.entry_price), errors="coerce")
+        peak_gain = (float(peak_close) / state.entry_price - 1.0) if pd.notna(peak_close) and state.entry_price > 0 else 0.0
+        if (
+            last_price is not None
+            and bool(payload.get("partial_profit_taken", False))
+            and peak_gain >= 2.0
+            and pd.notna(prior_day_low)
+            and float(prior_day_low) > 0
+            and last_price < float(prior_day_low)
+        ):
+            payload["exit_reason"] = "intraday_super_winner_prior_low_stop"
+            submitted = _submit_order(
+                store,
+                broker,
+                notifier,
+                session_date=session_date,
+                symbol=state.symbol,
+                side="SELL",
+                quantity=state.shares,
+                price_hint=float(last_price),
+                payload=payload,
+            )
+            if submitted is not None:
+                notifier.notify(
+                    "SELL ORDER SUBMITTED",
+                    [f"- symbol: {state.symbol}", f"- qty: {state.shares}", "- reason: intraday_super_winner_prior_low_stop"],
+                    level="WARNING",
+                )
+                _reserve_tax_if_profitable(
+                    store,
+                    notifier,
+                    symbol=state.symbol,
+                    entry_price=state.entry_price,
+                    exit_price=float(last_price),
+                    shares=state.shares,
+                    reason="intraday_super_winner_prior_low_stop",
+                )
+            continue
         if last_price is not None and last_price <= state.initial_stop:
-            payload = _payload_dict(row.get("payload_json"))
             payload["exit_reason"] = "intraday_hard_stop"
             submitted = _submit_order(
                 store,
@@ -440,11 +483,13 @@ def _evaluate_end_of_day_exits(
         if latest is None:
             survivors.append(row)
             continue
-        action = evaluate_exit_action(state, row, cfg=cfg)
+        action = evaluate_exit_action(state, latest, cfg=cfg)
         payload = _payload_dict(row.get("payload_json"))
         payload["pending_dma21_grace"] = bool(action.get("pending_dma21_grace", False))
         payload["partial_profit_taken"] = bool(action.get("partial_profit_taken", state.partial_profit_taken))
         payload["reduced_on_dma21"] = bool(action.get("reduced_on_dma21", state.reduced_on_dma21))
+        payload["peak_close"] = float(action.get("peak_close", state.peak_close))
+        payload["prior_day_low"] = float(action.get("prior_day_low", getattr(latest, "low", 0.0)))
 
         if action.get("action") == "reduce":
             target_remaining = int(action.get("target_remaining_shares", state.shares))
@@ -476,6 +521,7 @@ def _evaluate_end_of_day_exits(
             state.pending_dma21_grace = bool(action.get("pending_dma21_grace", False))
             state.partial_profit_taken = bool(action.get("partial_profit_taken", state.partial_profit_taken))
             state.reduced_on_dma21 = bool(action.get("reduced_on_dma21", state.reduced_on_dma21))
+            state.peak_close = float(action.get("peak_close", state.peak_close))
             _upsert_demo_position(store, state=state, session_date=session_date)
             continue
 
@@ -641,7 +687,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
         open_positions = _open_positions_frame(store)
         daily_bars = store.load_bars("1d", symbols=symbols)
         intraday_bars = store.load_bars("5m", symbols=symbols)
-        signal_report = build_breakout_signal_report(daily_bars, intraday_bars, cfg=cfg)
+        signal_report, _summary = build_breakout_signal_report(daily_bars, intraday_bars, cfg=cfg)
         if cfg.use_industry_composite_priority:
             try:
                 full_daily_for_priority = store.load_bars("1d")
@@ -659,7 +705,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
         exit_frame = prepare_exit_daily_frame(daily_bars, session_timezone=cfg.session_timezone)
         latest_exit = exit_frame.sort_values("date").groupby("symbol", sort=False).tail(1)
         selected = selected.merge(
-            latest_exit[["symbol", "adr20_pct", "dma10", "dma21", "hold_score", "tight_low_volume_day"]],
+                latest_exit[["symbol", "adr20_pct", "dma10", "dma21", "dma50", "prev_low", "hold_score", "tight_low_volume_day", "is_week_end_row"]],
             on="symbol",
             how="left",
         )
@@ -781,6 +827,9 @@ def run_live_trader(settings: Settings | None = None) -> None:
                 "priority_move_thrust": getattr(row, "priority_move_thrust", None),
                 "priority_industry_rs": getattr(row, "priority_industry_rs", None),
                 "priority_setup_sweet": getattr(row, "priority_setup_sweet", None),
+                "priority_tight_reversal_thrust_candidate": getattr(row, "priority_tight_reversal_thrust_candidate", None),
+                "peak_close": state.peak_close,
+                "prior_day_low": getattr(row, "prev_low", None),
             }
             submitted = _submit_order(
                 store,

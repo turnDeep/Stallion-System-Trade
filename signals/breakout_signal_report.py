@@ -38,14 +38,15 @@ DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
     },
     "intraday_calibration": {
         "standard_breakout": {
-            "trigger_min": 82.0,
+            "trigger_min": 0.0,
             "cum_vol_ratio_min": 1.5,
             "bar_vol_ratio_min": 0.0,
-            "move_from_open_min": 0.0,
+            "move_from_open_min": -1.0,
+            "trigger_above_pivot_pct": 0.01,
         },
         "tight_reversal": {
-            "trigger_min": 75.0,
-            "cum_vol_ratio_min": 0.0,
+            "trigger_min": 0.0,
+            "cum_vol_ratio_min": 1.5,
             "bar_vol_ratio_min": 0.0,
             "entry_dist_norm_max": 1.0,
             "gap_norm_max": 1.1,
@@ -54,10 +55,10 @@ DEFAULT_CALIBRATED_PARAMS: dict[str, object] = {
     },
 }
 
-NORMAL_SETUP_MIN = 58.0
-NORMAL_TRIGGER_MIN = 70.0
-OVERRIDE_SETUP_MIN = 48.0
-OVERRIDE_TRIGGER_MIN = 75.0
+NORMAL_SETUP_MIN = 0.0
+NORMAL_TRIGGER_MIN = 0.0
+OVERRIDE_SETUP_MIN = 0.0
+OVERRIDE_TRIGGER_MIN = 0.0
 
 
 def load_calibrated_params(path: Path = CALIBRATED_PARAMS_PATH) -> dict[str, object]:
@@ -281,12 +282,14 @@ def _finalize_report(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     params = load_calibrated_params()
     leader_min = _standard_leader_min_from_params(params)
-    setup_min = float(_cfg_get(params, "daily_calibration", "standard_setup_min", 58.0))
     trigger_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "trigger_min", 72.0))
     cum_vol_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "cum_vol_ratio_min", 0.0))
     bar_vol_min = float(_nested_get(params, "intraday_calibration", "standard_breakout", "bar_vol_ratio_min", 0.0))
     move_from_open_min = float(
         _nested_get(params, "intraday_calibration", "standard_breakout", "move_from_open_min", 0.0)
+    )
+    trigger_above_pivot_pct = float(
+        _nested_get(params, "intraday_calibration", "standard_breakout", "trigger_above_pivot_pct", 0.01)
     )
 
     report = setup_candidates.merge(
@@ -302,14 +305,16 @@ def _finalize_report(
     cum_vol_ratio = pd.to_numeric(report["cum_vol_ratio_at_trigger"], errors="coerce").fillna(0.0)
     bar_vol_ratio = pd.to_numeric(report["bar_vol_ratio_at_trigger"], errors="coerce").fillna(0.0)
     move_from_open = pd.to_numeric(report["move_from_open_at_trigger"], errors="coerce").fillna(-np.inf)
+    trigger_close = pd.to_numeric(report["trigger_close"], errors="coerce")
+    pivot_level = pd.to_numeric(report["pivot_high"], errors="coerce")
     report["standard_rule_pass"] = (
         report["broke_out"]
         & (pd.to_numeric(report["leader_score"], errors="coerce") >= leader_min)
-        & (pd.to_numeric(report["setup_score_pre"], errors="coerce") >= setup_min)
         & (trigger_score >= trigger_min)
         & (cum_vol_ratio >= cum_vol_min)
         & (bar_vol_ratio >= bar_vol_min)
         & (move_from_open >= move_from_open_min)
+        & (trigger_close >= pivot_level * (1.0 + trigger_above_pivot_pct))
     )
     report["golden_rule_pass"] = report["standard_rule_pass"]
     report["breakout_signal"] = (
@@ -693,7 +698,7 @@ def _merge_standard_and_zigzag_reports(
         "trigger_time", "trigger_close", "trigger_score",
         "cum_vol_ratio_at_trigger", "bar_vol_ratio_at_trigger",
         "move_from_open_at_trigger", "dist_above_res_at_trigger",
-        "breakout_type", "pivot_high", "effective_pivot_level",
+        "breakout_type", "broke_out", "pivot_high", "effective_pivot_level",
         "standard_breakout_signal", "zigzag_breakout_signal",
         "entry_source", "entry_lane", "entry_stop_policy",
         "same_day_priority_score",
@@ -730,20 +735,43 @@ def _merge_standard_and_zigzag_reports(
     report["zigzag_breakout_signal"] = report["zigzag_breakout_signal"].fillna(False).astype(bool)
     report["breakout_signal"] = report["standard_breakout_signal"] | report["zigzag_breakout_signal"]
 
+    params = load_calibrated_params()
+    compact_leader_min = float(_cfg_get(params, "daily_calibration", "leader_min", 60.0))
+    compact_cum_vol_min = float(
+        _nested_get(params, "intraday_calibration", "standard_breakout", "cum_vol_ratio_min", 1.5)
+    )
+    compact_trigger_above_pivot_pct = float(
+        _nested_get(params, "intraday_calibration", "standard_breakout", "trigger_above_pivot_pct", 0.01)
+    )
+    compact_pivot = pd.to_numeric(report["effective_pivot_level"], errors="coerce").fillna(
+        pd.to_numeric(report.get("pivot_high"), errors="coerce")
+    )
+    compact_trigger_close = pd.to_numeric(report["trigger_close"], errors="coerce")
+    compact_cum_vol = pd.to_numeric(report["cum_vol_ratio_at_trigger"], errors="coerce").fillna(0.0)
+    compact_signal = (
+        report["history_ok"].fillna(False).astype(bool)
+        & report["broke_out"].fillna(False).astype(bool)
+        & (pd.to_numeric(report["leader_score"], errors="coerce") >= compact_leader_min)
+        & (compact_cum_vol >= compact_cum_vol_min)
+        & (compact_trigger_close >= compact_pivot * (1.0 + compact_trigger_above_pivot_pct))
+    )
+    report["breakout_signal"] = compact_signal
+    report["standard_breakout_signal"] = compact_signal & report["entry_source"].eq("standard_breakout")
+    report["zigzag_breakout_signal"] = compact_signal & report["entry_source"].eq("tight_reversal")
+    report["entry_source"] = np.where(compact_signal, "compact_breakout", "none")
+    report["entry_lane"] = np.where(compact_signal, "compact", "none")
+    report["entry_stop_policy"] = np.where(compact_signal, "respect_stop_limit", "none")
+    report["same_day_priority_score"] = np.where(compact_signal, compact_cum_vol, np.nan)
+
     report["entry_priority_bucket"] = np.select(
         [
-            report["entry_source"].eq("standard_breakout"),
-            report["entry_source"].eq("tight_reversal"),
+            report["entry_source"].eq("compact_breakout"),
         ],
-        [0, 1],
+        [0],
         default=99,
     )
 
-    report["priority_score_within_source"] = np.where(
-        report["entry_source"].eq("standard_breakout"),
-        pd.to_numeric(report["rs_rating"], errors="coerce"),
-        pd.to_numeric(report["trigger_score"], errors="coerce"),
-    )
+    report["priority_score_within_source"] = np.where(compact_signal, compact_cum_vol, np.nan)
 
     report["trigger_time_ny"] = pd.to_datetime(report["trigger_time"], errors="coerce").dt.strftime("%H:%M")
     report["date"] = pd.to_datetime(report["date"]).dt.normalize()

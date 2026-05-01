@@ -2,31 +2,32 @@
   "daily_calibration": {
     "leader_min": 60.0,
     "standard_leader_min": 60.0,
-    "tight_leader_min": 63.0,
+    "tight_leader_min": 60.0,
     "leader_quantile": 0.85,
-    "standard_setup_min": 68.0,
-    "tight_setup_min": 55.0,
+    "standard_setup_min": 0.0,
+    "tight_setup_min": 0.0,
     "use_setup_max": false
   },
   "intraday_calibration": {
     "standard_breakout": {
-      "trigger_min": 82.0,
+      "trigger_min": 0.0,
       "cum_vol_ratio_min": 1.5,
       "bar_vol_ratio_min": 0.0,
-      "move_from_open_min": 0.0
+      "move_from_open_min": -1.0,
+      "trigger_above_pivot_pct": 0.01
     },
     "tight_reversal": {
-      "trigger_min": 75.0,
-      "cum_vol_ratio_min": 0.0,
+      "trigger_min": 0.0,
+      "cum_vol_ratio_min": 1.5,
       "bar_vol_ratio_min": 0.0,
-      "entry_dist_norm_max": 1.0,
-      "gap_norm_max": 1.1,
+      "entry_dist_norm_max": 99.0,
+      "gap_norm_max": 99.0,
       "same_day_stop_rate_max": 0.35
     }
   },
   "metadata": {
-    "generated_at": "2026-04-28T00:00:00+09:00",
-    "source": "no-lookahead core_move0 score validation",
-    "selection_note": "Core move0 conditions: standard leader>=60/setup>=68/trigger>=82/cumvol>=1.5/move>=0%; tight leader>=63/setup>=55/trigger>=75/dist_norm<=1.0/gap_norm<=1.1. Same-day ranking uses core_move0 score: leader/setup/trigger/volume/prior_runup/move plus leader>=95 bonus. A+ replacement remains leader>=95/setup>=68/trigger>=77/cumvol>=3/move>=-5%."
+    "generated_at": "2026-04-30T00:00:00+09:00",
+    "source": "compact trigger1pct_partial20_3x33 + super_prior_low_only validation",
+    "selection_note": "Compact conditions: history_ok, broke_out, leader_score>=60, cum_vol_ratio_at_trigger>=1.5, trigger_close>=effective_pivot_level*1.01. Same-day ranking uses cum_vol_ratio_at_trigger descending. Portfolio uses 3 slots x 33.33%, +20% half partial, weekly close below 50DMA for normal runners, and +200% peak gain prior-day-low stop for super winners. Industry composite and A+ replacement are disabled."
   }
 }

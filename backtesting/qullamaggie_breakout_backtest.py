@@ -18,13 +18,13 @@ import pandas as pd
 @dataclass
 class BacktestConfig:
     initial_equity: float = 100_000.0
-    max_positions: int = 5
+    max_positions: int = 3
 
     risk_pct_per_trade: float = 1.0
-    max_alloc_pct_per_trade: float = 0.25
+    max_alloc_pct_per_trade: float = 1.0 / 3.0
 
-    commission_rate: float = 0.00132
-    slippage_bps: float = 5.0
+    commission_rate: float = 0.002
+    slippage_bps: float = 0.0
 
     ep_gap_exclusion_pct: float = 0.10
 
@@ -35,8 +35,8 @@ class BacktestConfig:
     fast_fail_days: int = 1
     day0_day1_pivot_fail_exit_all: bool = True
 
-    tp_partial_r: float = 1.75
-    tp_partial_pct: float = 0.10
+    tp_partial_r: float = 999.0
+    tp_partial_pct: float = 0.20
 
     dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
@@ -53,6 +53,9 @@ class BacktestConfig:
     entry_at: str = "trigger_close"
 
     allow_reentry_same_symbol: bool = False
+    use_compact_runner_exit: bool = True
+    use_super_winner_prior_low_stop: bool = True
+    super_winner_prior_low_peak_gain_min: float = 2.0
 
 
 @dataclass
@@ -74,6 +77,7 @@ class Position:
     reduced_on_dma21: bool = False
     entry_source: str = "standard_breakout"
     entry_lane: str = "none"
+    peak_close: float = np.nan
 
 
 @dataclass
@@ -166,6 +170,7 @@ def prepare_daily(daily: pd.DataFrame) -> pd.DataFrame:
     g = df.groupby("symbol", sort=False)
 
     df["prev_close"] = g["close"].shift(1)
+    df["prev_low"] = g["low"].shift(1)
 
     tr = np.maximum.reduce([
         (df["high"] - df["low"]).to_numpy(),
@@ -177,6 +182,9 @@ def prepare_daily(daily: pd.DataFrame) -> pd.DataFrame:
     df["atr20"] = g["tr"].rolling(20, min_periods=20).mean().reset_index(level=0, drop=True)
     df["dma10"] = g["close"].rolling(10, min_periods=10).mean().reset_index(level=0, drop=True)
     df["dma21"] = g["close"].rolling(21, min_periods=21).mean().reset_index(level=0, drop=True)
+    df["dma50"] = g["close"].rolling(50, min_periods=50).mean().reset_index(level=0, drop=True)
+    week_periods = df["date"].dt.to_period("W-FRI")
+    df["is_week_end_row"] = df["date"].eq(df.groupby(["symbol", week_periods], sort=False)["date"].transform("max"))
 
     daily_range = df["high"] - df["low"]
     df["adr20_pct"] = (
@@ -342,18 +350,18 @@ def prepare_signals(signals: pd.DataFrame) -> pd.DataFrame:
     if "entry_priority_bucket" not in sig.columns:
         sig["entry_priority_bucket"] = np.select(
             [
+                sig["entry_source"].eq("compact_breakout"),
                 sig["entry_source"].eq("standard_breakout"),
                 sig["entry_source"].eq("tight_reversal"),
             ],
-            [0, 1],
+            [0, 1, 2],
             default=99,
         )
 
     if "priority_score_within_source" not in sig.columns:
-        sig["priority_score_within_source"] = np.where(
-            sig["entry_source"].eq("standard_breakout"),
-            pd.to_numeric(sig.get("rs_rating"), errors="coerce"),
-            pd.to_numeric(sig.get("trigger_score"), errors="coerce"),
+        sig["priority_score_within_source"] = pd.to_numeric(
+            sig.get("cum_vol_ratio_at_trigger", sig.get("trigger_score")),
+            errors="coerce",
         )
 
     if "entry_stop_policy" not in sig.columns:
@@ -534,6 +542,9 @@ def run_backtest(
             row_close = float(row.close)
             row_dma10 = float(row.dma10) if not pd.isna(row.dma10) else np.nan
             row_dma21 = float(row.dma21) if not pd.isna(row.dma21) else np.nan
+            row_dma50 = float(row.dma50) if hasattr(row, "dma50") and not pd.isna(row.dma50) else np.nan
+            row_prev_low = float(row.prev_low) if hasattr(row, "prev_low") and not pd.isna(row.prev_low) else np.nan
+            row_is_week_end = bool(row.is_week_end_row) if hasattr(row, "is_week_end_row") else False
             row_hold_score = float(row.hold_score) if not pd.isna(row.hold_score) else np.nan
             row_tight_low_volume = bool(row.tight_low_volume_day) if pd.notna(row.tight_low_volume_day) else False
 
@@ -593,6 +604,73 @@ def run_backtest(
             if pos.shares == 0:
                 del open_positions[sym]
                 closed_symbols_once.add(sym)
+                continue
+
+            pos_peak_close = pos.peak_close if np.isfinite(pos.peak_close) else pos.entry_price
+            peak_gain = pos_peak_close / pos.entry_price - 1.0
+            if (
+                cfg.use_super_winner_prior_low_stop
+                and pos.partial_profit_taken
+                and pos.shares > 0
+                and peak_gain >= cfg.super_winner_prior_low_peak_gain_min
+                and np.isfinite(row_prev_low)
+                and row_low < row_prev_low
+            ):
+                cash = sell_down_to_target(
+                    pos=pos,
+                    target_remaining_shares=0,
+                    date=cur_date,
+                    price=row_prev_low,
+                    reason="super_winner_prior_low_stop",
+                    bar_time=None,
+                    fills=fills,
+                    cfg=cfg,
+                    cash=cash,
+                )
+                if pos.shares == 0:
+                    del open_positions[sym]
+                    closed_symbols_once.add(sym)
+                continue
+
+            if cfg.use_compact_runner_exit:
+                if pos.partial_profit_taken:
+                    if row_is_week_end and np.isfinite(row_dma50) and row_close < row_dma50 and pos.shares > 0:
+                        cash = sell_down_to_target(
+                            pos=pos,
+                            target_remaining_shares=0,
+                            date=cur_date,
+                            price=row_close,
+                            reason="weekly_close_below_50dma",
+                            bar_time=None,
+                            fills=fills,
+                            cfg=cfg,
+                            cash=cash,
+                        )
+                        if pos.shares == 0:
+                            del open_positions[sym]
+                            closed_symbols_once.add(sym)
+                        continue
+                    pos.peak_close = max(pos_peak_close, row_close)
+                    continue
+
+                if not pd.isna(row_dma21) and row_close < row_dma21 and pos.shares > 0:
+                    cash = sell_down_to_target(
+                        pos=pos,
+                        target_remaining_shares=0,
+                        date=cur_date,
+                        price=row_close,
+                        reason="pre_partial_dma21_exit",
+                        bar_time=None,
+                        fills=fills,
+                        cfg=cfg,
+                        cash=cash,
+                    )
+                    if pos.shares == 0:
+                        del open_positions[sym]
+                        closed_symbols_once.add(sym)
+                    continue
+
+                pos.peak_close = max(pos_peak_close, row_close)
                 continue
 
             if not pd.isna(row_dma21) and row_close < row_dma21 and pos.shares > 0:
@@ -820,6 +898,7 @@ def run_backtest(
                     initial_risk_per_share=exec_price - initial_stop,
                     entry_source=str(getattr(row, "entry_source", "standard_breakout")),
                     entry_lane=str(getattr(row, "entry_lane", "none")),
+                    peak_close=max(exec_price, float(row.close)),
                 )
                 open_positions[row.symbol] = pos
 

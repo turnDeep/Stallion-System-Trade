@@ -34,18 +34,20 @@ class RuntimeConfig:
     watchlist_cv_folds: int = 5
     watchlist_cv_min_train_sessions: int = 15
     watchlist_cv_embargo_sessions: int = 1
-    max_positions: int = 5
+    max_positions: int = 3
     fractional_shares_enabled: bool = False
     min_minutes_from_open: int = 5
     max_minutes_from_open: int = 90
     risk_pct_per_trade: float = 1.0
-    max_alloc_pct_per_trade: float = 0.25
+    max_alloc_pct_per_trade: float = 1.0 / 3.0
     ep_gap_exclusion_pct: float = 0.10
     stop_buffer_bps: float = 10.0
     atr_limit_mult: float = 1.0
     adr_limit_mult: float = 1.0
     fast_fail_days: int = 1
     day0_day1_pivot_fail_exit_all: bool = True
+    tp_partial_r: float = 999.0
+    tp_partial_pct: float = 0.20
     dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
     dma10_exit_threshold: float = 50.0
@@ -54,8 +56,8 @@ class RuntimeConfig:
     use_intraday_trigger_time: bool = True
     entry_at: str = "trigger_close"
     allow_reentry_same_symbol: bool = False
-    use_industry_composite_priority: bool = True
-    enable_a_plus_replacement: bool = True
+    use_industry_composite_priority: bool = False
+    enable_a_plus_replacement: bool = False
     replacement_score_margin: float = 18.0
     min_price: float = 5.0
     min_daily_volume: float = 1_000_000.0
@@ -76,6 +78,9 @@ class RuntimeConfig:
     pre_market_notification_minute: int = 25
     broker_sync_seconds: int = 60
     watchdog_stale_seconds: int = 180
+    use_compact_runner_exit: bool = True
+    use_super_winner_prior_low_stop: bool = True
+    super_winner_prior_low_peak_gain_min: float = 2.0
 
 
 @dataclass(frozen=True)

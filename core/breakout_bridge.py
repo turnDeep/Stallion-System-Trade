@@ -19,10 +19,10 @@ from signals.breakout_signal_report import build_breakout_signal_report as _buil
 class BreakoutConfig:
     session_timezone: str = "America/New_York"
     initial_equity: float = 100_000.0
-    max_positions: int = 5
+    max_positions: int = 3
     shortlist_count: int = 100
     risk_pct_per_trade: float = 1.0
-    max_alloc_pct_per_trade: float = 0.25
+    max_alloc_pct_per_trade: float = 1.0 / 3.0
     ep_gap_exclusion_pct: float = 0.10
     stop_buffer_bps: float = 10.0
     atr_limit_mult: float = 1.0
@@ -31,8 +31,8 @@ class BreakoutConfig:
     day0_day1_pivot_fail_exit_all: bool = True
 
     # Exit policy
-    tp_partial_r: float = 1.75
-    tp_partial_pct: float = 0.10
+    tp_partial_r: float = 999.0
+    tp_partial_pct: float = 0.20
 
     dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
@@ -46,9 +46,12 @@ class BreakoutConfig:
     use_intraday_trigger_time: bool = True
     entry_at: str = "trigger_close"
     allow_reentry_same_symbol: bool = False
-    use_industry_composite_priority: bool = True
-    enable_a_plus_replacement: bool = True
+    use_industry_composite_priority: bool = False
+    enable_a_plus_replacement: bool = False
     replacement_score_margin: float = 18.0
+    use_compact_runner_exit: bool = True
+    use_super_winner_prior_low_stop: bool = True
+    super_winner_prior_low_peak_gain_min: float = 2.0
 
     @classmethod
     def from_settings(cls, settings: Any) -> "BreakoutConfig":
@@ -59,15 +62,15 @@ class BreakoutConfig:
             max_positions=int(runtime.max_positions),
             shortlist_count=int(runtime.shortlist_count),
             risk_pct_per_trade=float(getattr(runtime, "risk_pct_per_trade", 1.0)),
-            max_alloc_pct_per_trade=float(getattr(runtime, "max_alloc_pct_per_trade", 0.25)),
+            max_alloc_pct_per_trade=float(getattr(runtime, "max_alloc_pct_per_trade", 1.0 / 3.0)),
             ep_gap_exclusion_pct=float(getattr(runtime, "ep_gap_exclusion_pct", 0.10)),
             stop_buffer_bps=float(getattr(runtime, "stop_buffer_bps", 10.0)),
             atr_limit_mult=float(getattr(runtime, "atr_limit_mult", 1.0)),
             adr_limit_mult=float(getattr(runtime, "adr_limit_mult", 1.0)),
             fast_fail_days=int(getattr(runtime, "fast_fail_days", 1)),
             day0_day1_pivot_fail_exit_all=bool(getattr(runtime, "day0_day1_pivot_fail_exit_all", True)),
-            tp_partial_r=float(getattr(runtime, "tp_partial_r", 1.75)),
-            tp_partial_pct=float(getattr(runtime, "tp_partial_pct", 0.10)),
+            tp_partial_r=float(getattr(runtime, "tp_partial_r", 999.0)),
+            tp_partial_pct=float(getattr(runtime, "tp_partial_pct", 0.20)),
             dma10_reduce_to_frac=float(getattr(runtime, "dma10_reduce_to_frac", 0.25)),
             dma10_reduce_threshold=float(getattr(runtime, "dma10_reduce_threshold", 55.0)),
             dma10_exit_threshold=float(getattr(runtime, "dma10_exit_threshold", 50.0)),
@@ -80,9 +83,14 @@ class BreakoutConfig:
             use_intraday_trigger_time=bool(getattr(runtime, "use_intraday_trigger_time", True)),
             entry_at=str(getattr(runtime, "entry_at", "trigger_close")),
             allow_reentry_same_symbol=bool(getattr(runtime, "allow_reentry_same_symbol", False)),
-            use_industry_composite_priority=bool(getattr(runtime, "use_industry_composite_priority", True)),
-            enable_a_plus_replacement=bool(getattr(runtime, "enable_a_plus_replacement", True)),
+            use_industry_composite_priority=bool(getattr(runtime, "use_industry_composite_priority", False)),
+            enable_a_plus_replacement=bool(getattr(runtime, "enable_a_plus_replacement", False)),
             replacement_score_margin=float(getattr(runtime, "replacement_score_margin", 18.0)),
+            use_compact_runner_exit=bool(getattr(runtime, "use_compact_runner_exit", True)),
+            use_super_winner_prior_low_stop=bool(getattr(runtime, "use_super_winner_prior_low_stop", True)),
+            super_winner_prior_low_peak_gain_min=float(
+                getattr(runtime, "super_winner_prior_low_peak_gain_min", 2.0)
+            ),
         )
 
 
@@ -105,6 +113,7 @@ class BreakoutPositionState:
     entry_lane: str = "none"
     same_day_priority_score: float | None = None
     industry_a_plus_candidate: bool = False
+    peak_close: float = np.nan
 
 
 def _coerce_row(row: Mapping[str, Any] | pd.Series | Any) -> dict[str, Any]:
@@ -313,6 +322,7 @@ def build_position_state_from_signal(
             else None
         ),
         industry_a_plus_candidate=bool(item.get("industry_a_plus_candidate", False)),
+        peak_close=float(max(float(entry_price), pd.to_numeric(item.get("close", entry_price), errors="coerce"))),
     )
 
 
@@ -331,6 +341,9 @@ def evaluate_exit_action(
     hold_score = pd.to_numeric(row.get("hold_score"), errors="coerce")
     dma10 = pd.to_numeric(row.get("dma10"), errors="coerce")
     dma21 = pd.to_numeric(row.get("dma21"), errors="coerce")
+    dma50 = pd.to_numeric(row.get("dma50"), errors="coerce")
+    prev_low = pd.to_numeric(row.get("prev_low"), errors="coerce")
+    is_week_end_row = bool(row.get("is_week_end_row", False))
     tight_low_volume = bool(row.get("tight_low_volume_day")) if pd.notna(row.get("tight_low_volume_day")) else False
     days_since_entry = int((cur_date - pd.Timestamp(state.entry_date).normalize()).days)
 
@@ -374,7 +387,78 @@ def evaluate_exit_action(
                 "pending_dma21_grace": state.pending_dma21_grace,
                 "partial_profit_taken": True,
                 "reduced_on_dma21": state.reduced_on_dma21,
+                "peak_close": state.peak_close,
+                "prior_day_low": low_price,
             }
+
+    peak_close = state.peak_close if np.isfinite(state.peak_close) else state.entry_price
+    peak_gain = peak_close / state.entry_price - 1.0
+
+    if (
+        cfg.use_super_winner_prior_low_stop
+        and state.partial_profit_taken
+        and state.shares > 0
+        and peak_gain >= cfg.super_winner_prior_low_peak_gain_min
+        and pd.notna(prev_low)
+        and np.isfinite(float(prev_low))
+        and low_price < float(prev_low)
+    ):
+        return {
+            "action": "exit_all",
+            "reason": "super_winner_prior_low_stop",
+            "price": float(prev_low),
+            "pending_dma21_grace": False,
+            "partial_profit_taken": state.partial_profit_taken,
+            "reduced_on_dma21": state.reduced_on_dma21,
+            "peak_close": peak_close,
+            "prior_day_low": low_price,
+        }
+
+    if cfg.use_compact_runner_exit:
+        updated_peak_close = max(peak_close, close_price)
+        if state.partial_profit_taken:
+            if is_week_end_row and pd.notna(dma50) and close_price < float(dma50):
+                return {
+                    "action": "exit_all",
+                    "reason": "weekly_close_below_50dma",
+                    "price": close_price,
+                    "pending_dma21_grace": False,
+                    "partial_profit_taken": state.partial_profit_taken,
+                    "reduced_on_dma21": state.reduced_on_dma21,
+                    "peak_close": updated_peak_close,
+                    "prior_day_low": low_price,
+                }
+            return {
+                "action": "hold",
+                "reason": "compact_runner_hold",
+                "pending_dma21_grace": False,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": state.reduced_on_dma21,
+                "peak_close": updated_peak_close,
+                "prior_day_low": low_price,
+            }
+
+        if pd.notna(dma21) and close_price < float(dma21):
+            return {
+                "action": "exit_all",
+                "reason": "pre_partial_dma21_exit",
+                "price": close_price,
+                "pending_dma21_grace": False,
+                "partial_profit_taken": state.partial_profit_taken,
+                "reduced_on_dma21": state.reduced_on_dma21,
+                "peak_close": updated_peak_close,
+                "prior_day_low": low_price,
+            }
+
+        return {
+            "action": "hold",
+            "reason": "compact_pre_partial_hold",
+            "pending_dma21_grace": False,
+            "partial_profit_taken": state.partial_profit_taken,
+            "reduced_on_dma21": state.reduced_on_dma21,
+            "peak_close": updated_peak_close,
+            "prior_day_low": low_price,
+        }
 
     # 21DMA: small runner に縮封E-> さらに悪化で final exit
     if pd.notna(dma21) and close_price < float(dma21) and state.shares > 0:
@@ -523,6 +607,9 @@ def _to_exit_backtest_config(cfg: BreakoutConfig) -> ExitBacktestConfig:
         use_intraday_trigger_time=cfg.use_intraday_trigger_time,
         entry_at=cfg.entry_at,
         allow_reentry_same_symbol=cfg.allow_reentry_same_symbol,
+        use_compact_runner_exit=cfg.use_compact_runner_exit,
+        use_super_winner_prior_low_stop=cfg.use_super_winner_prior_low_stop,
+        super_winner_prior_low_peak_gain_min=cfg.super_winner_prior_low_peak_gain_min,
     )
 
 
@@ -534,7 +621,7 @@ def run_breakout_backtest(
     cfg = cfg or BreakoutConfig()
     daily = normalize_daily_bars(daily_bars, session_timezone=cfg.session_timezone)
     intraday = normalize_intraday_bars(intraday_bars, session_timezone=cfg.session_timezone)
-    report = build_breakout_signal_report(daily, intraday, cfg=cfg)
+    report, _summary = build_breakout_signal_report(daily, intraday, cfg=cfg)
     signals = signals_from_report(report)
     equity_curve, fills_df, stats, _ = _run_breakout_backtest(
         daily=daily,
