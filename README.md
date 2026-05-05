@@ -9,9 +9,12 @@ Auto-Swing-Trade-Bot is a fully automated, **Qullamaggie-style breakout swing tr
 This system is designed to identify and trade explosive multi-day or multi-week moves (swing trades) by entering precisely when a stock breaks out of a daily consolidation pattern.
 
 - **Universe:** Top 3000 U.S. stocks by market cap, fetched via Financial Modeling Prep (FMP).
-- **Trading Strategy (Qullamaggie Style):** Focuses on stocks with strong momentum. It identifies daily setups (consolidations, flags) and triggers entries based on intraday 5-minute breakout confirmations.
-- **Advanced Signal Engines:** Incorporates multiple sub-strategies including standard breakouts, zigzag breakouts, entry lanes, and industry-priority scoring.
-- **Portfolio Management:** Swing positions with overnight holds. It includes dynamic exit strategies (trailing stops) and a tax reserve manager to safeguard profits.
+- **Trading Strategy (Base Compact):** Focuses on stocks with strong momentum and structural breakouts. Entries are triggered based on high volume impact (`cum_vol_ratio >= 1.5`) and a clear intraday confirmation (`trigger_close >= pivot * 1.01`). Extensive backtesting has shown that true high-conviction breakouts organically achieve high relative strength; thus, `leader_score >= 60` is utilized strictly as a fail-safe / safety net rather than a primary selection metric.
+- **Portfolio Management:** A highly concentrated 3-slot architecture (33.3% allocation each) designed to aggressively capture multi-bagger runners. It includes a tax reserve manager to safeguard capital.
+- **Dynamic Exit Logic:** A multi-tiered runner management system tailored for the leader lifecycle:
+  - Takes +20% partial profit to lock in initial gains.
+  - Trails the remaining core position using progressive moving averages (10, 21, 50 DMAs).
+  - Promotes positions that achieve a +200% peak gain to a "super winner prior-day-low stop", riding massive trends until structural breakdown.
 - **Runtime Environment:** Runs via Docker. Connects to Webull for live trading, with an automatic fallback to "Demo Mode" if API credentials are not provided.
 - **Data Storage:** Uses a robust mix of SQLite, Parquet snapshots, and daily archive files for persistent historical data, circumventing API rate limits.
 
@@ -51,6 +54,8 @@ Tax reserve manager:
 
 ```bash
 python scripts/manage_tax_reserve.py show
+python scripts/manage_tax_reserve.py archive --year 2024
+python scripts/manage_tax_reserve.py history
 ```
 
 Docker:
@@ -72,6 +77,7 @@ docker compose up -d --build
 
 ## Notes
 
+- The system now operates strictly on the "Base Compact" strategy configuration. Over-optimized features like complex industry-priority caps or A+ replacement logic have been disabled in favor of raw volume impact ranking (`cum_vol_ratio_at_trigger`) to ensure robustness.
 - Root-level thin wrappers were removed; use `scripts/` commands instead.
 - The old duplicated `backtester.py` entrypoint is now `scripts/backtest.py`; the implementation remains in `core/backtester.py`.
 - A stale legacy `optimizer.py` was removed because it referenced a non-existent `run_backtest` export and was not used by the current swing breakout system.
