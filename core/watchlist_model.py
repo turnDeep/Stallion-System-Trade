@@ -13,7 +13,7 @@ from sklearn.metrics import average_precision_score, roc_auc_score
 from sklearn.preprocessing import StandardScaler
 
 from .features import _daily_bar_session_dates, build_stage2_labeled_panel
-from .modeling import fit_hist_gbm, score_candidates
+from .modeling import Stage2RetiredError, fit_hist_gbm, score_candidates
 from .strategy import StandardSystemSpec, select_candidates_for_session
 
 
@@ -518,9 +518,9 @@ def _run_stage2_for_shortlists(
     intraday_labeled: pd.DataFrame,
     settings,
     train_execution_dates: list[pd.Timestamp],
-) -> tuple[pd.DataFrame, float]:
+) -> tuple[pd.DataFrame, float, str]:
     if shortlist_frame.empty:
-        return pd.DataFrame(), float("nan")
+        return pd.DataFrame(), float("nan"), "skipped_empty_shortlist"
 
     stage2_spec = StandardSystemSpec(
         min_minutes_from_open=settings.runtime.min_minutes_from_open,
@@ -530,14 +530,17 @@ def _run_stage2_for_shortlists(
     train_mask = _normalize_date_series(intraday_labeled["session_date"]).isin(_normalize_date_series(train_execution_dates))
     train_intraday = intraday_labeled.loc[train_mask].copy()
     if train_intraday.empty:
-        return pd.DataFrame(), float("nan")
+        return pd.DataFrame(), float("nan"), "skipped_no_training_data"
     if len(train_intraday) > stage2_spec.max_train_rows:
         train_intraday = train_intraday.tail(stage2_spec.max_train_rows).copy()
     try:
         stage2_model, threshold = fit_hist_gbm(train_intraday, stage2_spec)
+    except Stage2RetiredError as exc:
+        LOGGER.info("Stage-2 model skipped during watchlist comparison: %s", exc)
+        return pd.DataFrame(), float("nan"), "retired_no_stage2_features"
     except Exception:
         LOGGER.exception("Stage-2 model training failed during watchlist comparison")
-        return pd.DataFrame(), float("nan")
+        return pd.DataFrame(), float("nan"), "training_failed"
 
     trade_rows: list[pd.DataFrame] = []
     shortlist_symbol_days = shortlist_frame[["next_session_date", "symbol"]].drop_duplicates()
@@ -556,7 +559,7 @@ def _run_stage2_for_shortlists(
         chosen["trade_return"] = chosen["net_return_stress_exec"]
         trade_rows.append(chosen)
     trades = pd.concat(trade_rows, ignore_index=True) if trade_rows else pd.DataFrame()
-    return trades, threshold
+    return trades, threshold, "ok"
 
 
 def _feature_distribution_table(training_panel: pd.DataFrame) -> pd.DataFrame:
@@ -659,8 +662,12 @@ def evaluate_watchlist_model_cv(
             .unique()
             .tolist()
         )
-        new_trades, stage2_threshold = _run_stage2_for_shortlists(new_shortlist, intraday_labeled, settings, train_execution_dates)
-        legacy_trades, _ = _run_stage2_for_shortlists(legacy_shortlist, intraday_labeled, settings, train_execution_dates)
+        new_trades, stage2_threshold, new_stage2_status = _run_stage2_for_shortlists(
+            new_shortlist, intraday_labeled, settings, train_execution_dates
+        )
+        legacy_trades, _, legacy_stage2_status = _run_stage2_for_shortlists(
+            legacy_shortlist, intraday_labeled, settings, train_execution_dates
+        )
         new_trade_metrics = _evaluate_trade_log(new_trades, settings.runtime.max_positions)
         legacy_trade_metrics = _evaluate_trade_log(legacy_trades, settings.runtime.max_positions)
 
@@ -671,6 +678,8 @@ def evaluate_watchlist_model_cv(
             {
                 "fold_id": fold_id,
                 "stage2_threshold": stage2_threshold,
+                "new_stage2_status": new_stage2_status,
+                "legacy_stage2_status": legacy_stage2_status,
                 "new_trade_count": new_trade_metrics["trade_count"],
                 "new_win_rate": new_trade_metrics["win_rate"],
                 "new_total_return": new_trade_metrics["total_return"],
