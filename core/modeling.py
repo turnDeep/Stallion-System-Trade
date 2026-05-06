@@ -10,6 +10,16 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 
 from .strategy import STANDARD_FEATURE_COLUMNS, StandardSystemSpec, compute_threshold
 
+STAGE2_RETIRED_MESSAGE = (
+    "Stage-2 intraday HistGradientBoosting is retired because no production "
+    "feature columns are defined. Use the breakout signal report/watchlist "
+    "ranking directly, or define STANDARD_FEATURE_COLUMNS before training."
+)
+
+
+class Stage2RetiredError(RuntimeError):
+    """Raised when legacy Stage-2 modeling code is invoked after retirement."""
+
 
 @dataclass(frozen=True)
 class ModelBundle:
@@ -20,8 +30,19 @@ class ModelBundle:
     artifact_path: Path
 
 
+def stage2_feature_columns(frame: pd.DataFrame | None = None) -> list[str]:
+    if not STANDARD_FEATURE_COLUMNS:
+        raise Stage2RetiredError(STAGE2_RETIRED_MESSAGE)
+    if frame is None:
+        return list(STANDARD_FEATURE_COLUMNS)
+    features = [feature for feature in STANDARD_FEATURE_COLUMNS if feature in frame.columns]
+    if not features:
+        raise Stage2RetiredError(STAGE2_RETIRED_MESSAGE)
+    return features
+
+
 def fit_hist_gbm(train_frame: pd.DataFrame, spec: StandardSystemSpec) -> tuple[HistGradientBoostingClassifier, float]:
-    features = [feature for feature in STANDARD_FEATURE_COLUMNS if feature in train_frame.columns]
+    features = stage2_feature_columns(train_frame)
     frame = train_frame.dropna(subset=["label_stress_exec"]).copy()
     if frame.empty:
         raise ValueError("Training frame is empty.")
@@ -41,19 +62,20 @@ def fit_hist_gbm(train_frame: pd.DataFrame, spec: StandardSystemSpec) -> tuple[H
 def score_candidates(model: HistGradientBoostingClassifier, candidates: pd.DataFrame) -> pd.DataFrame:
     if candidates.empty:
         return candidates.copy()
-    features = [feature for feature in STANDARD_FEATURE_COLUMNS if feature in candidates.columns]
+    features = stage2_feature_columns(candidates)
     scored = candidates.copy()
     scored["score"] = model.predict_proba(scored[features])[:, 1]
     return scored
 
 
 def save_model_bundle(model: HistGradientBoostingClassifier, threshold: float, artifact_path: Path) -> ModelBundle:
+    features = stage2_feature_columns()
     artifact_path.parent.mkdir(parents=True, exist_ok=True)
     with artifact_path.open("wb") as handle:
-        pickle.dump({"model": model, "threshold": threshold, "features": STANDARD_FEATURE_COLUMNS}, handle, protocol=pickle.HIGHEST_PROTOCOL)
+        pickle.dump({"model": model, "threshold": threshold, "features": features}, handle, protocol=pickle.HIGHEST_PROTOCOL)
     return ModelBundle(
         model_name="hist_gbm_extended_5m_start",
-        feature_columns=tuple(STANDARD_FEATURE_COLUMNS),
+        feature_columns=tuple(features),
         threshold=threshold,
         created_at=pd.Timestamp.utcnow(),
         artifact_path=artifact_path,

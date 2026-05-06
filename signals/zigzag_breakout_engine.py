@@ -191,6 +191,14 @@ def _build_confirmed_pivots(sub: pd.DataFrame, order: int) -> list[dict[str, Any
     return out
 
 
+def _pivot_available_idx(pivot: dict[str, Any], pivot_confirm_bars: int) -> int:
+    """Return the first row index where a pivot can be used without future leakage."""
+    idx = int(pivot["idx"])
+    confirm_idx = int(pivot.get("confirm_idx", idx))
+    user_confirm_idx = idx + max(int(pivot_confirm_bars), 0)
+    return max(confirm_idx, user_confirm_idx)
+
+
 def _compute_zigzag_setup_daily(
     base: pd.DataFrame,
     *,
@@ -270,7 +278,7 @@ def _compute_zigzag_setup_daily(
         for i in range(m):
             while high_ptr < len(high_pivots):
                 pivot = high_pivots[high_ptr]
-                if (pivot["idx"] + pivot_confirm_bars) <= i and pivot["idx"] < i:
+                if _pivot_available_idx(pivot, pivot_confirm_bars) <= i and pivot["idx"] < i:
                     confirmed_highs.append(pivot)
                     high_ptr += 1
                 else:

@@ -51,7 +51,6 @@ class RuntimeConfig:
     dma10_reduce_to_frac: float = 0.25
     dma10_reduce_threshold: float = 55.0
     dma10_exit_threshold: float = 50.0
-    dma21_exit_threshold: float = 45.0
     use_dma21_tight_low_volume_grace: bool = True
     use_intraday_trigger_time: bool = True
     entry_at: str = "trigger_close"

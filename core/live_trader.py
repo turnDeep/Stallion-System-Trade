@@ -6,6 +6,7 @@ import time
 from datetime import datetime
 from typing import Any
 
+import numpy as np
 import pandas as pd
 import pytz
 
@@ -98,6 +99,20 @@ def _tax_adjusted_buying_power(store: SQLiteParquetStore, raw_buying_power: floa
     return max(0.0, float(raw_buying_power) - _reserved_tax_usd(store))
 
 
+def _entry_cost_multiplier(settings: Settings) -> float:
+    commission = max(0.0, float(settings.costs.commission_rate_one_way))
+    slippage = max(0.0, float(settings.costs.slippage_bps_per_side)) / 10_000.0
+    return 1.0 + commission + slippage
+
+
+def _entry_cash_capacity(settings: Settings, cash: float) -> float:
+    return max(0.0, float(cash)) / _entry_cost_multiplier(settings)
+
+
+def _entry_cash_cost(settings: Settings, shares: int, entry_price: float) -> float:
+    return max(0, int(shares)) * float(entry_price) * _entry_cost_multiplier(settings)
+
+
 def _reserve_tax_if_profitable(
     store: SQLiteParquetStore,
     notifier: DiscordNotifier,
@@ -149,6 +164,83 @@ def _build_quote_snapshot_frame(quotes: pd.DataFrame, observed_at_utc: pd.Timest
     work["ts"] = observed_at_utc
     work["payload_json"] = work.apply(lambda row: json.dumps(row.to_dict(), ensure_ascii=True, default=str), axis=1)
     return work[["symbol", "ts", "price", "cumulative_volume", "payload_json"]].dropna(subset=["price"])
+
+
+def _patch_today_exit_ohlc(
+    daily_bars: pd.DataFrame,
+    *,
+    session_date: pd.Timestamp,
+    quote_frame: pd.DataFrame,
+    intraday_bars: pd.DataFrame,
+) -> pd.DataFrame:
+    if daily_bars.empty:
+        return daily_bars
+
+    patched = daily_bars.copy()
+    time_col = "ts" if "ts" in patched.columns else "date" if "date" in patched.columns else None
+    if time_col is None:
+        return patched
+
+    patched[time_col] = pd.to_datetime(patched[time_col], utc=True, errors="coerce")
+    target_date = pd.Timestamp(session_date).normalize()
+    today_mask = patched[time_col].dt.normalize().dt.tz_localize(None).eq(target_date)
+    patched["symbol"] = patched["symbol"].astype(str).str.upper()
+
+    observed_rows: list[pd.DataFrame] = []
+    if not intraday_bars.empty:
+        intra = intraday_bars.copy()
+        intra["symbol"] = intra["symbol"].astype(str).str.upper()
+        intra_time_col = "ts" if "ts" in intra.columns else "datetime" if "datetime" in intra.columns else None
+        if intra_time_col is not None:
+            intra[intra_time_col] = pd.to_datetime(intra[intra_time_col], utc=True, errors="coerce")
+            intra_today = intra[intra[intra_time_col].dt.normalize().dt.tz_localize(None).eq(target_date)].copy()
+            if not intra_today.empty:
+                observed_rows.append(
+                    intra_today.assign(
+                        observed_close=pd.to_numeric(intra_today["close"], errors="coerce"),
+                        observed_high=pd.to_numeric(intra_today["high"], errors="coerce"),
+                        observed_low=pd.to_numeric(intra_today["low"], errors="coerce"),
+                    )[["symbol", "observed_close", "observed_high", "observed_low"]]
+                )
+
+    if not quote_frame.empty:
+        quote = quote_frame.copy()
+        quote["symbol"] = quote["symbol"].astype(str).str.upper()
+        quote_price = pd.to_numeric(quote["price"], errors="coerce")
+        observed_rows.append(
+            quote.assign(
+                observed_close=quote_price,
+                observed_high=quote_price,
+                observed_low=quote_price,
+            )[["symbol", "observed_close", "observed_high", "observed_low"]].dropna(subset=["observed_close"])
+        )
+
+    if not observed_rows:
+        return patched
+
+    observed = pd.concat(observed_rows, ignore_index=True)
+    observed = observed.groupby("symbol", as_index=False).agg(
+        observed_close=("observed_close", "last"),
+        observed_high=("observed_high", "max"),
+        observed_low=("observed_low", "min"),
+    )
+
+    for row in observed.itertuples(index=False):
+        sym_mask = patched["symbol"].eq(row.symbol)
+        mask = sym_mask & today_mask
+        if not mask.any():
+            continue
+        if pd.notna(row.observed_close):
+            patched.loc[mask, "close"] = float(row.observed_close)
+        if pd.notna(row.observed_high):
+            current_high = pd.to_numeric(patched.loc[mask, "high"], errors="coerce")
+            high_values = current_high.fillna(float(row.observed_high)).to_numpy(dtype="float64")
+            patched.loc[mask, "high"] = np.maximum(high_values, float(row.observed_high))
+        if pd.notna(row.observed_low):
+            current_low = pd.to_numeric(patched.loc[mask, "low"], errors="coerce")
+            low_values = current_low.fillna(float(row.observed_low)).to_numpy(dtype="float64")
+            patched.loc[mask, "low"] = np.minimum(low_values, float(row.observed_low))
+    return patched
 
 
 def _load_monitor_symbols(
@@ -641,24 +733,18 @@ def run_live_trader(settings: Settings | None = None) -> None:
             not eod_exit_done
             and _after_time(now_ny, settings.runtime.eod_exit_hour, settings.runtime.eod_exit_minute)
         ):
-            LOGGER.info("EOD EXIT triggered at %s (using live quote prices as proxy close)", now_ny.strftime("%H:%M"))
+            LOGGER.info("EOD EXIT triggered at %s (using observed intraday/quote OHLC)", now_ny.strftime("%H:%M"))
             daily_bars_for_exit = store.load_bars("1d", symbols=symbols)
-            if not quote_frame.empty and not daily_bars_for_exit.empty:
-                # Patch today's close in daily_bars with the current live quote price
-                today_str = str(today.date())
-                quote_price_map = {
-                    str(row.symbol).upper(): float(row.price)
-                    for row in quote_frame.itertuples(index=False)
-                    if pd.notna(getattr(row, "price", None))
-                }
-                daily_bars_for_exit["ts"] = pd.to_datetime(daily_bars_for_exit["ts"], utc=True, errors="coerce")
-                today_mask = daily_bars_for_exit["ts"].dt.normalize().dt.tz_localize(None).dt.strftime("%Y-%m-%d") == today_str
-                for sym, live_price in quote_price_map.items():
-                    sym_mask = daily_bars_for_exit["symbol"].eq(sym)
-                    daily_bars_for_exit.loc[sym_mask & today_mask, "close"] = live_price
+            intraday_bars_for_exit = store.load_bars("5m", symbols=symbols)
+            daily_bars_for_exit = _patch_today_exit_ohlc(
+                daily_bars_for_exit,
+                session_date=today,
+                quote_frame=quote_frame,
+                intraday_bars=intraday_bars_for_exit,
+            )
+            if not daily_bars_for_exit.empty:
                 LOGGER.info(
-                    "Patched today's close for %d symbols using live quote prices for EOD exit evaluation.",
-                    len(quote_price_map),
+                    "Patched today's OHLC with observed intraday bars and quote prices for EOD exit evaluation."
                 )
             _evaluate_end_of_day_exits(
                 store, broker, notifier,
@@ -669,7 +755,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
             eod_exit_done = True
             notifier.notify(
                 "EOD EXIT SCAN COMPLETE",
-                [f"- time: {now_ny.strftime('%H:%M')} NY", "- using: live quote prices as proxy close"],
+                [f"- time: {now_ny.strftime('%H:%M')} NY", "- using: observed intraday/quote OHLC"],
             )
 
         if _after_time(now_ny, settings.runtime.shutdown_hour, settings.runtime.shutdown_minute):
@@ -729,15 +815,16 @@ def run_live_trader(settings: Settings | None = None) -> None:
                 continue
 
             desired_slot_cash = float(effective_opening_buying_power) * cfg.max_alloc_pct_per_trade
+            desired_slot_cash_with_costs = desired_slot_cash * _entry_cost_multiplier(settings)
             precheck_state = build_position_state_from_signal(
                 row,
                 equity=effective_opening_buying_power,
-                cash=max(float(current_buying_power), desired_slot_cash),
+                cash=_entry_cash_capacity(settings, max(float(current_buying_power), desired_slot_cash_with_costs)),
                 cfg=cfg,
             )
             if precheck_state is None:
                 continue
-            needs_replacement = len(held_symbols) >= cfg.max_positions or current_buying_power < desired_slot_cash
+            needs_replacement = len(held_symbols) >= cfg.max_positions or current_buying_power < desired_slot_cash_with_costs
             if needs_replacement and cfg.enable_a_plus_replacement:
                 position_summaries = _priority_position_summaries(_open_positions_frame(store), quote_frame)
                 replace_idx = choose_replacement_index(position_summaries, row)
@@ -794,7 +881,12 @@ def run_live_trader(settings: Settings | None = None) -> None:
             elif len(held_symbols) >= cfg.max_positions:
                 continue
 
-            state = build_position_state_from_signal(row, equity=effective_opening_buying_power, cash=current_buying_power, cfg=cfg)
+            state = build_position_state_from_signal(
+                row,
+                equity=effective_opening_buying_power,
+                cash=_entry_cash_capacity(settings, current_buying_power),
+                cfg=cfg,
+            )
             if state is None:
                 continue
 
@@ -857,7 +949,7 @@ def run_live_trader(settings: Settings | None = None) -> None:
             if broker.is_demo:
                 _upsert_demo_position(store, state=state, session_date=today)
             held_symbols.add(state.symbol)
-            current_buying_power = max(0.0, current_buying_power - state.shares * state.entry_price)
+            current_buying_power = max(0.0, current_buying_power - _entry_cash_cost(settings, state.shares, state.entry_price))
 
         time.sleep(settings.runtime.quote_poll_seconds)
 
